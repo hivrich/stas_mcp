@@ -4,3 +4,8 @@
 {"timestamp": "2025-11-03T19:35:11.666176+00:00", "connection_id": "conn-1", "user_id": "user-42", "op": "plan.delete", "external_id": "plan:2025-w45", "status": "ok"}
 {"timestamp": "2025-11-03T19:37:33.940477+00:00", "connection_id": null, "user_id": null, "op": "plan.validate", "external_id": "plan:2025-w45", "status": "ok"}
 {"timestamp": "2025-11-03T19:39:40.720583+00:00", "connection_id": null, "user_id": null, "op": "plan.validate", "external_id": "plan:2025-w45", "status": "ok"}
+{"tool": "plan.validate", "ok": true, "errors": [], "payload": {"external_id": "plan:2025-w45", "athlete_id": "i-demo", "days": [{"date": "2025-11-03", "title": "Лёгкий", "blocks": []}]}, "timestamp": "2025-11-03T21:20:31.705265+00:00"}
+{"tool": "plan.publish", "ok": false, "reason": "missing_confirm", "payload": {"external_id": "plan:2025-w45", "athlete_id": "i-demo", "days": [{"date": "2025-11-03", "title": "Лёгкий", "blocks": []}]}, "timestamp": "2025-11-03T21:20:34.503848+00:00"}
+{"tool": "plan.publish", "ok": true, "external_id": "plan:2025-w45", "days_written": 1, "timestamp": "2025-11-03T21:20:39.634330+00:00"}
+{"tool": "plan.publish", "ok": true, "external_id": "plan:2025-w45", "idempotent": true, "timestamp": "2025-11-03T21:20:42.627974+00:00"}
+{"tool": "plan.delete", "ok": true, "external_id": "plan:2025-w45", "timestamp": "2025-11-03T21:20:45.956032+00:00"}

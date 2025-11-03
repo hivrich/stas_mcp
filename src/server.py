@@ -1,24 +1,72 @@
-import argparse
 import json
-import os
 import threading
 import time
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from typing import Any, Dict, Generator, Iterable, List, Optional
+
+from fastapi import FastAPI, HTTPException, Request
+from sse_starlette.sse import EventSourceResponse
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
-RESOURCE_DIR = DATA_DIR / "resources"
-SCHEMA_PATH = Path(__file__).resolve().parent / "assets" / "schema.plan.json"
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+SCHEMA_PATH = ASSETS_DIR / "schema.plan.json"
 AUDIT_LOG_PATH = DATA_DIR / "audit.log"
-LINKS_PATH = DATA_DIR / "links.json"
-PLANS_PATH = DATA_DIR / "plans.json"
+
+PING_INTERVAL_SECONDS = 15
+
+
+def _load_schema() -> Dict[str, Any]:
+    text = SCHEMA_PATH.read_text(encoding="utf-8")
+    return json.loads(text)
+
+
+PLAN_SCHEMA = _load_schema()
+
+
+class AuditLogger:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+
+    def log(self, entry: Dict[str, Any]) -> None:
+        payload = dict(entry)
+        payload.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
+        line = json.dumps(payload, ensure_ascii=False)
+        with self._lock:
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+
+
+class PlanStore:
+    def __init__(self) -> None:
+        self._responses: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+
+    def get(self, external_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            stored = self._responses.get(external_id)
+            if stored is None:
+                return None
+            return dict(stored)
+
+    def upsert(self, external_id: str, response: Dict[str, Any]) -> None:
+        with self._lock:
+            self._responses[external_id] = dict(response)
+
+    def remove(self, external_id: str) -> None:
+        with self._lock:
+            self._responses.pop(external_id, None)
+
+
+app = FastAPI()
+audit_logger = AuditLogger(AUDIT_LOG_PATH)
+plan_store = PlanStore()
+
 
 MANIFEST = {
-    "server": "stas-mcp-bridge-stub",
     "resources": [
         {"name": "current.json", "path": "/mcp/resource/current.json"},
         {"name": "last_training.json", "path": "/mcp/resource/last_training.json"},
@@ -31,438 +79,173 @@ MANIFEST = {
     ],
 }
 
-PING_INTERVAL = 15
+
+@app.get("/healthz")
+def healthz() -> Dict[str, Any]:
+    return {"ok": True, "ts": int(time.time())}
 
 
-class AuditLogger:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.lock = threading.Lock()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-
-    def log(self, entry: Dict[str, Any]) -> None:
-        with self.lock:
-            with self.path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+@app.get("/mcp/resource/current.json")
+def current_resource() -> Dict[str, Any]:
+    return {"ok": True, "athlete_id": "i-demo", "week": "2025-W45", "risks": []}
 
 
-class LinkStore:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.lock = threading.Lock()
-        self._links: Dict[str, str] = {}
-        self._load()
-
-    def _load(self) -> None:
-        if self.path.exists():
-            try:
-                with self.path.open("r", encoding="utf-8") as fh:
-                    data = json.load(fh)
-                    if isinstance(data, dict):
-                        self._links = {str(k): str(v) for k, v in data.items()}
-            except Exception:
-                self._links = {}
-
-    def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("w", encoding="utf-8") as fh:
-            json.dump(self._links, fh, ensure_ascii=False, indent=2)
-
-    def get(self, connection_id: str) -> Optional[str]:
-        with self.lock:
-            return self._links.get(connection_id)
-
-    def set(self, connection_id: str, user_id: str) -> None:
-        with self.lock:
-            self._links[connection_id] = user_id
-            self._save()
+@app.get("/mcp/resource/last_training.json")
+def last_training_resource() -> Dict[str, Any]:
+    return {"ok": True, "last": {"date": "2025-11-02", "type": "Run", "km": 10}}
 
 
-class PlanStore:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.lock = threading.Lock()
-        self._plans: Dict[str, Dict[str, Any]] = {}
-        self._load()
-
-    def _load(self) -> None:
-        if self.path.exists():
-            try:
-                with self.path.open("r", encoding="utf-8") as fh:
-                    data = json.load(fh)
-                    if isinstance(data, dict):
-                        self._plans = data
-            except Exception:
-                self._plans = {}
-
-    def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("w", encoding="utf-8") as fh:
-            json.dump(self._plans, fh, ensure_ascii=False, indent=2)
-
-    def get(self, external_id: str) -> Optional[Dict[str, Any]]:
-        with self.lock:
-            return self._plans.get(external_id)
-
-    def set(self, external_id: str, payload: Dict[str, Any]) -> None:
-        with self.lock:
-            self._plans[external_id] = payload
-            self._save()
-
-    def delete(self, external_id: str) -> None:
-        with self.lock:
-            if external_id in self._plans:
-                del self._plans[external_id]
-                self._save()
+@app.get("/mcp/resource/schema.plan.json")
+def schema_resource() -> Dict[str, Any]:
+    return PLAN_SCHEMA
 
 
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+@app.post("/mcp/tool/plan.validate")
+def plan_validate(request: Request) -> Dict[str, Any]:
+    payload = request.json()
+    draft = _extract_draft(payload)
+    errors = _validate_draft(draft)
+    ok = not errors
+    response = {"ok": ok, "errors": errors, "warnings": [], "diff": {}}
+    audit_logger.log({"tool": "plan.validate", "ok": ok, "errors": errors, "payload": payload})
+    return response
 
 
-def load_schema() -> Dict[str, Any]:
-    with SCHEMA_PATH.open("r", encoding="utf-8") as fh:
-        return json.load(fh)
+@app.post("/mcp/tool/plan.publish")
+def plan_publish(request: Request) -> Dict[str, Any]:
+    payload = request.json()
+    confirm = isinstance(payload, dict) and payload.get("confirm") is True
+    if not confirm:
+        response = {"ok": False, "need_confirm": True, "hint": "Add confirm:true"}
+        audit_logger.log({"tool": "plan.publish", "ok": False, "reason": "missing_confirm", "payload": payload})
+        return response
+
+    draft = _extract_draft(payload)
+    errors = _validate_draft(draft)
+    if errors:
+        audit_logger.log({"tool": "plan.publish", "ok": False, "errors": errors, "payload": payload})
+        raise HTTPException(status_code=400, detail={"ok": False, "errors": errors})
+
+    external_id = _resolve_external_id(payload, draft)
+    if external_id is None:
+        audit_logger.log({"tool": "plan.publish", "ok": False, "reason": "missing_external_id", "payload": payload})
+        raise HTTPException(status_code=400, detail={"ok": False, "errors": ["external_id is required"]})
+
+    existing = plan_store.get(external_id)
+    if existing:
+        audit_logger.log({"tool": "plan.publish", "ok": True, "external_id": external_id, "idempotent": True})
+        return existing
+
+    days = draft.get("days") if isinstance(draft, dict) else []
+    days_written = len(days) if isinstance(days, list) else 0
+    response = {
+        "ok": True,
+        "days_written": days_written,
+        "external_id": external_id,
+        "at": datetime.now(timezone.utc).isoformat(),
+        "source": "mcp-stub",
+    }
+    plan_store.upsert(external_id, response)
+    audit_logger.log({"tool": "plan.publish", "ok": True, "external_id": external_id, "days_written": days_written})
+    return response
 
 
-SCHEMA = load_schema()
+@app.post("/mcp/tool/plan.delete")
+def plan_delete(request: Request) -> Dict[str, Any]:
+    payload = request.json()
+    if not isinstance(payload, dict):
+        audit_logger.log({"tool": "plan.delete", "ok": False, "reason": "invalid_payload", "payload": payload})
+        raise HTTPException(status_code=400, detail={"ok": False, "error": "invalid_payload"})
 
-audit_logger = AuditLogger(AUDIT_LOG_PATH)
-link_store = LinkStore(LINKS_PATH)
-plan_store = PlanStore(PLANS_PATH)
+    confirm = payload.get("confirm") is True
+    if not confirm:
+        response = {"ok": False, "need_confirm": True, "hint": "Add confirm:true"}
+        audit_logger.log({"tool": "plan.delete", "ok": False, "reason": "missing_confirm", "payload": payload})
+        return response
 
+    external_id = payload.get("external_id")
+    if not isinstance(external_id, str):
+        audit_logger.log({"tool": "plan.delete", "ok": False, "reason": "missing_external_id", "payload": payload})
+        raise HTTPException(status_code=400, detail={"ok": False, "error": "missing_external_id"})
 
-class MCPHandler(BaseHTTPRequestHandler):
-    server_version = "stas-mcp/0.1"
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
-        # Reduce noise; standard output not required.
-        pass
-
-    # Utility helpers
-    def _json_response(self, status: int, payload: Dict[str, Any]) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _read_body(self) -> bytes:
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        if length <= 0:
-            return b""
-        return self.rfile.read(length)
-
-    def _require_connection(self) -> Tuple[Optional[str], Optional[str]]:
-        connection_id = self.headers.get("x-connection-id")
-        if not connection_id:
-            return None, None
-        user_id = link_store.get(connection_id)
-        return connection_id, user_id
-
-    def _ensure_account_link(self, connection_id: Optional[str], user_id: Optional[str]) -> Optional[Dict[str, Any]]:
-        if not connection_id:
-            return {
-                "ok": False,
-                "error": "missing_connection_id",
-                "hint": "Provide X-Connection-Id header",
-            }
-        if not user_id:
-            return {
-                "ok": False,
-                "need_link": True,
-                "link_hint": "Open /_/link to enter your internal UserID",
-            }
-        return None
-
-    # Request handlers
-    def do_GET(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        if parsed.path == "/healthz":
-            self._json_response(200, {"ok": True, "ts": int(time.time())})
-            return
-        if parsed.path == "/sse":
-            self.handle_sse()
-            return
-        if parsed.path.startswith("/mcp/resource/"):
-            resource_name = parsed.path.replace("/mcp/resource/", "", 1)
-            self.handle_resource(resource_name)
-            return
-        if parsed.path == "/_/link":
-            self.handle_link(parsed)
-            return
-        self.send_error(404, "Not Found")
-
-    def do_POST(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        if parsed.path.startswith("/mcp/tool/"):
-            tool_name = parsed.path.replace("/mcp/tool/", "", 1)
-            self.handle_tool(tool_name)
-            return
-        if parsed.path == "/_/link":
-            self.handle_link(parsed, method="POST")
-            return
-        self.send_error(404, "Not Found")
-
-    def handle_sse(self) -> None:
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
-        self.end_headers()
-        try:
-            manifest_payload = json.dumps(MANIFEST, ensure_ascii=False)
-            self.wfile.write(f"event: manifest\ndata: {manifest_payload}\n\n".encode("utf-8"))
-            self.wfile.flush()
-            while True:
-                timestamp = str(int(time.time()))
-                self.wfile.write(f"event: ping\ndata: {timestamp}\n\n".encode("utf-8"))
-                self.wfile.flush()
-                time.sleep(PING_INTERVAL)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-
-    def handle_resource(self, name: str) -> None:
-        if name == "schema.plan.json":
-            path = SCHEMA_PATH
-        else:
-            path = RESOURCE_DIR / name
-        if not path.exists():
-            self.send_error(404, "Not Found")
-            return
-        try:
-            data = path.read_bytes()
-        except OSError:
-            self.send_error(500, "Failed to load resource")
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(data)
-
-    def handle_link(self, parsed, method: str = "GET") -> None:
-        if method == "POST":
-            length = int(self.headers.get("Content-Length", "0") or "0")
-            body = self.rfile.read(length) if length > 0 else b""
-            params = parse_qs(body.decode("utf-8"))
-        else:
-            params = parse_qs(parsed.query)
-        connection_id = (params.get("connection_id") or [""])[0]
-        user_id = (params.get("user_id") or [""])[0]
-        message = ""
-        if connection_id and user_id:
-            link_store.set(connection_id, user_id)
-            message = f"Linked connection {connection_id} to user {user_id}."
-        elif method == "POST":
-            message = "Both connection_id and user_id are required."
-        html = f"""
-<!DOCTYPE html>
-<html lang=\"en\">
-<head><meta charset=\"utf-8\"><title>Link Account</title></head>
-<body>
-<h1>Link Connection</h1>
-<p>{message}</p>
-<form method=\"post\">
-  <label>Connection ID <input type=\"text\" name=\"connection_id\" value=\"{connection_id}\" required></label><br>
-  <label>User ID <input type=\"text\" name=\"user_id\" value=\"{user_id}\" required></label><br>
-  <button type=\"submit\">Link</button>
-</form>
-</body>
-</html>
-"""
-        body = html.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def handle_tool(self, name: str) -> None:
-        raw_body = self._read_body()
-        try:
-            payload = json.loads(raw_body.decode("utf-8") or "{}") if raw_body else {}
-        except json.JSONDecodeError:
-            self._json_response(400, {"ok": False, "error": "invalid_json"})
-            return
-        connection_id, user_id = self._require_connection()
-
-        if name == "plan.validate":
-            draft = self._extract_draft(payload)
-            ok, errors = validate_plan_schema(draft)
-            status = "ok" if ok else "error"
-            audit_logger.log(
-                {
-                    "timestamp": utc_now_iso(),
-                    "connection_id": connection_id,
-                    "user_id": user_id,
-                    "op": "plan.validate",
-                    "external_id": draft.get("external_id") if isinstance(draft, dict) else None,
-                    "status": status,
-                }
-            )
-            self._json_response(200, {"ok": ok, "errors": errors, "warnings": [], "diff": {}})
-            return
-
-        # plan.publish and plan.delete require account link
-        link_error = self._ensure_account_link(connection_id, user_id)
-        if link_error:
-            self._json_response(403, link_error)
-            return
-
-        if name == "plan.publish":
-            draft = self._extract_draft(payload)
-            ok, errors = validate_plan_schema(draft)
-            if not ok:
-                audit_logger.log(
-                    {
-                        "timestamp": utc_now_iso(),
-                        "connection_id": connection_id,
-                        "user_id": user_id,
-                        "op": "plan.publish",
-                        "external_id": draft.get("external_id") if isinstance(draft, dict) else None,
-                        "status": "error",
-                    }
-                )
-                self._json_response(400, {"ok": False, "errors": errors, "warnings": [], "diff": {}})
-                return
-            confirm = payload.get("confirm") if isinstance(payload, dict) else None
-            if confirm is not True:
-                self._json_response(200, {"ok": False, "need_confirm": True, "hint": "Add confirm:true"})
-                return
-            external_id = self._resolve_external_id(payload, draft)
-            plan_store.set(external_id, draft)
-            response = {
-                "ok": True,
-                "days_written": len(draft.get("days", []) if isinstance(draft, dict) else []),
-                "external_id": external_id,
-                "at": utc_now_iso(),
-                "source": "mcp-stub",
-            }
-            audit_logger.log(
-                {
-                    "timestamp": response["at"],
-                    "connection_id": connection_id,
-                    "user_id": user_id,
-                    "op": "plan.publish",
-                    "external_id": external_id,
-                    "status": "ok",
-                }
-            )
-            self._json_response(200, response)
-            return
-
-        if name == "plan.delete":
-            if not isinstance(payload, dict):
-                self._json_response(400, {"ok": False, "error": "invalid_payload"})
-                return
-            external_id = payload.get("external_id")
-            if not external_id:
-                self._json_response(400, {"ok": False, "error": "missing_external_id"})
-                return
-            confirm = payload.get("confirm")
-            if confirm is not True:
-                self._json_response(200, {"ok": False, "need_confirm": True, "hint": "Add confirm:true"})
-                return
-            plan_store.delete(external_id)
-            audit_logger.log(
-                {
-                    "timestamp": utc_now_iso(),
-                    "connection_id": connection_id,
-                    "user_id": user_id,
-                    "op": "plan.delete",
-                    "external_id": external_id,
-                    "status": "ok",
-                }
-            )
-            self._json_response(200, {"ok": True, "external_id": external_id})
-            return
-
-        self._json_response(404, {"ok": False, "error": "unknown_tool"})
-
-    def _extract_draft(self, payload: Any) -> Any:
-        if isinstance(payload, dict) and "draft" in payload:
-            return payload["draft"]
-        return payload
-
-    def _resolve_external_id(self, payload: Any, draft: Any) -> str:
-        if isinstance(payload, dict) and isinstance(payload.get("external_id"), str):
-            return payload["external_id"]
-        if isinstance(draft, dict) and isinstance(draft.get("external_id"), str):
-            return draft["external_id"]
-        return "plan:demo"
+    plan_store.remove(external_id)
+    response = {"ok": True, "external_id": external_id}
+    audit_logger.log({"tool": "plan.delete", "ok": True, "external_id": external_id})
+    return response
 
 
-def validate_plan_schema(data: Any) -> Tuple[bool, List[str]]:
+@app.get("/sse")
+def sse_endpoint() -> EventSourceResponse:
+    return EventSourceResponse(_sse_event_generator)
+
+
+def _extract_draft(payload: Any) -> Any:
+    if isinstance(payload, dict) and "draft" in payload:
+        return payload["draft"]
+    return payload
+
+
+def _resolve_external_id(payload: Any, draft: Any) -> Optional[str]:
+    if isinstance(payload, dict) and isinstance(payload.get("external_id"), str):
+        return payload["external_id"]
+    if isinstance(draft, dict) and isinstance(draft.get("external_id"), str):
+        return draft["external_id"]
+    return None
+
+
+def _validate_draft(draft: Any) -> List[str]:
     errors: List[str] = []
-    if not isinstance(data, dict):
-        errors.append("draft must be an object")
-        return False, errors
-    required_top = ["external_id", "athlete_id", "days"]
-    for key in required_top:
-        if key not in data:
-            errors.append(f"missing required field: {key}")
-    if "external_id" in data and not isinstance(data["external_id"], str):
+    if not isinstance(draft, dict):
+        return ["draft must be an object"]
+
+    for field in ("external_id", "athlete_id", "days"):
+        if field not in draft:
+            errors.append(f"missing required field: {field}")
+
+    if "external_id" in draft and not isinstance(draft["external_id"], str):
         errors.append("external_id must be a string")
-    if "athlete_id" in data and not isinstance(data["athlete_id"], str):
+    if "athlete_id" in draft and not isinstance(draft["athlete_id"], str):
         errors.append("athlete_id must be a string")
-    if "meta" in data and not isinstance(data["meta"], dict):
+    if "meta" in draft and not isinstance(draft["meta"], dict):
         errors.append("meta must be an object")
-    days = data.get("days")
+
+    days = draft.get("days")
     if not isinstance(days, list):
         errors.append("days must be an array")
     else:
-        for idx, item in enumerate(days):
-            if not isinstance(item, dict):
+        for idx, day in enumerate(days):
+            if not isinstance(day, dict):
                 errors.append(f"days[{idx}] must be an object")
                 continue
-            for req_key in ("date", "title", "blocks"):
-                if req_key not in item:
-                    errors.append(f"days[{idx}] missing required field: {req_key}")
-            if "date" in item and not isinstance(item["date"], str):
+            for key in ("date", "title", "blocks"):
+                if key not in day:
+                    errors.append(f"days[{idx}] missing required field: {key}")
+            if "date" in day and not isinstance(day["date"], str):
                 errors.append(f"days[{idx}].date must be a string")
-            if "title" in item and not isinstance(item["title"], str):
+            if "title" in day and not isinstance(day["title"], str):
                 errors.append(f"days[{idx}].title must be a string")
-            if "blocks" in item and not isinstance(item["blocks"], list):
+            if "blocks" in day and not isinstance(day["blocks"], list):
                 errors.append(f"days[{idx}].blocks must be an array")
-    is_valid = len(errors) == 0
-    return is_valid, errors
+    return errors
 
 
-def run_server(host: str, port: int) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((host, port), MCPHandler)
-    return server
+def _sse_event_generator() -> Iterable[Dict[str, Any]]:
+    yield {"event": "manifest", "data": json.dumps(MANIFEST)}
+    while True:
+        time.sleep(PING_INTERVAL_SECONDS)
+        yield {"event": "ping", "data": str(int(time.time()))}
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the MCP bridge server")
+    import argparse
+    import uvicorn
+
+    parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8787)
     args = parser.parse_args()
 
-    port = args.port
-    server: Optional[ThreadingHTTPServer] = None
-    for candidate in (port, port + 1, port + 2):
-        try:
-            server = run_server(args.host, candidate)
-            port = candidate
-            break
-        except OSError:
-            continue
-    if server is None:
-        raise RuntimeError("Unable to bind to a port")
-
-    print(f"Serving on http://{args.host}:{port}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+    uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

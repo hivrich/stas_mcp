@@ -1,21 +1,7 @@
-{
-  "type": "object",
-  "required": ["external_id", "athlete_id", "days"],
-  "properties": {
-    "external_id": { "type": "string" },
-    "athlete_id": { "type": "string" },
-    "meta": { "type": "object" },
-    "days": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["date", "title", "blocks"],
-        "properties": {
-          "date": { "type": "string" },
-          "title": { "type": "string" },
-          "blocks": { "type": "array" }
-        }
-      }
-    }
-  }
+{ "type":"object","required":["external_id","athlete_id","days"],
+  "properties":{"external_id":{"type":"string"},"athlete_id":{"type":"string"},
+    "meta":{"type":"object"},
+    "days":{"type":"array","items":{"type":"object",
+      "required":["date","title","blocks"],
+      "properties":{"date":{"type":"string"},"title":{"type":"string"},"blocks":{"type":"array"}}}}}
 }
