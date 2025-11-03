@@ -1,0 +1,10 @@
+{
+  "name": "stas_mcp",
+  "features": { "ghcr.io/devcontainers/features/python:1": { "version": "3.11" } },
+  "postCreateCommand": "pip install -r requirements.txt",
+  "forwardPorts": [8787],
+  "portsAttributes": {
+    "8787": { "label": "STAS MCP /sse", "onAutoForward": "openBrowser" }
+  },
+  "postStartCommand": "python -m uvicorn src.server:app --host 0.0.0.0 --port 8787"
+}
