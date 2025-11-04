@@ -1,26 +1,27 @@
 # UAT Evidence (PROD)
-BASE: https://stas-mcp.onrender.com
-DATE: 2025-11-04
 
-HEALTHZ:
-```json
-{"ok":true,"ts":1762252179}
-```
+TARGET_BASE=https://stas-mcp.onrender.com
 
-SSE(HEAD):
+## Steps
 
-```
-event: manifest
-data: {"resources": [{"name": "current.json", "path": "/mcp/resource/current.json"}, {"name": "last_training.json", "path": "/mcp/resource/last_training.json"}, {"name": "schema.plan.json", "path": "/mcp/resource/schema.plan.json"}], "tools": [{"name": "plan.validate", "path": "/mcp/tool/plan.validate", "method": "POST"}, {"name": "plan.publish", "path": "/mcp/tool/plan.publish", "method": "POST"}, {"name": "plan.delete", "path": "/mcp/tool/plan.delete", "method": "POST"}]}
+### A) Health & SSE
+- `GET $TARGET_BASE/healthz` → `{"ok":true}`
+- `GET $TARGET_BASE/sse` → first event `manifest`
 
-event: ping
-data: {"ts": 1762252213}
-```
+### B) Connect flow
+- From ChatGPT MCP connector, open `$TARGET_BASE/link` when prompted and submit your real `user_id` once (per connection).
 
-NOTES:
+### C) Read
+- `GET $TARGET_BASE/mcp/resource/current.json` → JSON summary from gateway
+- `GET $TARGET_BASE/mcp/resource/last_training.json` → most recent finished training
 
-* Codex runner cannot access external URLs (CONNECT 403), so PROD checks were captured by a human via browser and recorded here.
-* Live endpoints: `/healthz`, `/mcp/resource/schema.plan.json`, `/mcp/tool/*`, `/sse`.
-* For full request flows (validate → publish(confirm) → delete), use any HTTP client against BASE.
+### D) Validate/Publish
+- `POST $TARGET_BASE/mcp/tool/plan.validate` with a small draft (1 day)
+- `POST $TARGET_BASE/mcp/tool/plan.publish` with `{external_id:"plan:2025-w45", draft:{…}, confirm:true}` → `{ok:true, days_written:>=1}`
 
-```
+### E) Idempotency
+- Repeat publish with the same `external_id` → gateway handles dedupe (no duplicate events)
+
+### F) Delete
+- `POST $TARGET_BASE/mcp/tool/plan.delete {external_id:"plan:2025-w45"}` → `{need_confirm:true}`
+- `POST $TARGET_BASE/mcp/tool/plan.delete {external_id:"plan:2025-w45", confirm:true}` → `{ok:true}`
