@@ -17,9 +17,9 @@ from jsonschema import Draft7Validator
 from sse_starlette.sse import EventSourceResponse
 from starlette.middleware.cors import CORSMiddleware
 
-from linking import get_status as linking_get_status
-from linking import set_linked as linking_set_linked
-from linking import set_pending as linking_set_pending
+from .linking import get_status as linking_get_status
+from .linking import set_linked as linking_set_linked
+from .linking import set_pending as linking_set_pending
 
 try:
     from .config import settings
