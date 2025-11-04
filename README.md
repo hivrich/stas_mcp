@@ -16,3 +16,8 @@ python src/server.py --host 0.0.0.0 --port 8787
 
 The server listens on port `8787` by default and exposes the MCP endpoints
 under `/mcp` as well as `/sse` for streaming updates.
+
+## UAT Evidence
+
+The latest local user acceptance test run is documented in
+[UAT.md](UAT.md).
