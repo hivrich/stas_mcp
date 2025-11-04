@@ -44,11 +44,11 @@ Quick checks:
 
 ### Connect (ChatGPT → Connector)
 
-1. MCP Server URL: `https://stas-mcp.onrender.com/sse`
+1. MCP Server URL: `https://stas-mcp.onrender.com/mcp`
 2. Authentication: none required
 3. Press **Connect**. On first use you will be redirected to [`/link`](https://stas-mcp.onrender.com/link) to enter your STAS `user_id` (one time per connection).
 
-After the `user_id` is stored, the connector will call the MCP resources/tools using the linked identity.
+After the `user_id` is stored, the connector will call the MCP JSON-RPC endpoint and related resources/tools using the linked identity.
 
 ### What endpoints MCP calls
 
@@ -65,3 +65,9 @@ UAT (production evidence): see [UAT_PROD.md](UAT_PROD.md).
 
 * [`/whoami`](https://stas-mcp.onrender.com/whoami) or [`/_/whoami`](https://stas-mcp.onrender.com/_/whoami)
 * [`/link`](https://stas-mcp.onrender.com/link) (with `?connection_id=` to pre-fill)
+
+## MCP HTTP endpoint
+- Public MCP URL: `https://<host>/mcp`
+- Transport: Streamable HTTP (JSON-RPC 2.0)
+- Methods: `initialize`, `tools/list`, `tools/call`
+- For browser clients, CORS is enabled; preflight: `OPTIONS /mcp`.
