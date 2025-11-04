@@ -4,17 +4,22 @@ import asyncio
 import base64
 import datetime as dt
 import json
+import logging
 import pathlib
 import re
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
 import httpx
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from jsonschema import Draft7Validator
 from sse_starlette.sse import EventSourceResponse
 from starlette.middleware.cors import CORSMiddleware
+
+from linking import get_status as linking_get_status
+from linking import set_linked as linking_set_linked
+from linking import set_pending as linking_set_pending
 
 try:
     from .config import settings
@@ -35,6 +40,9 @@ AUDIT_FILE = DATA_DIR / "audit.log"
 if not LINKS_FILE.exists():
     LINKS_FILE.write_text("{}", encoding="utf-8")
 AUDIT_FILE.touch(exist_ok=True)
+
+
+logger = logging.getLogger(__name__)
 
 
 def load_schema() -> Dict[str, Any]:
@@ -574,7 +582,6 @@ async def healthz() -> Dict[str, Any]:
 
 
 @app.get("/whoami")
-@app.get("/_/whoami")
 async def whoami() -> Dict[str, Any]:
     links = _load_links()
     return {
@@ -583,6 +590,60 @@ async def whoami() -> Dict[str, Any]:
         "bridge_base": BRIDGE_BASE,
         "links": len(links),
     }
+
+
+def _mask_connection_id(connection_id: str) -> str:
+    if len(connection_id) <= 4:
+        return "***"
+    return f"{connection_id[:4]}***"
+
+
+def _linking_status(connection_id: str) -> Dict[str, Any]:
+    persisted = _resolve_user_id(connection_id)
+    if persisted:
+        try:
+            linking_set_linked(connection_id, int(persisted))
+        except (TypeError, ValueError):
+            logger.debug("Skipping persisted user_id that is not int for %s", _mask_connection_id(connection_id))
+    status = linking_get_status(connection_id)
+    if status.get("linked") and "user_id" not in status and persisted:
+        try:
+            status["user_id"] = int(persisted)
+        except (TypeError, ValueError):
+            pass
+    return status
+
+
+@app.get("/_whoami")
+async def api_whoami(request: Request) -> Dict[str, Any]:
+    connection_id = _resolve_connection_id(request, {})
+    if not connection_id:
+        raise HTTPException(status_code=422, detail="connection_id is required")
+    status = _linking_status(connection_id)
+    response: Dict[str, Any] = {"connection_id": connection_id, "linked": bool(status.get("linked"))}
+    if status.get("user_id") is not None:
+        response["user_id"] = status["user_id"]
+    return response
+
+
+@app.get("/_link")
+async def api_link(connection_id: str = Query(..., min_length=1)) -> Dict[str, Any]:
+    linking_set_pending(connection_id)
+    status = _linking_status(connection_id)
+    logger.info("linking.request connection=%s", _mask_connection_id(connection_id))
+    instructions = [
+        "Откройте страницу авторизации STAS и подтвердите доступ для соединения.",
+        "Скопируйте одноразовый code и вызовите POST /auth/exchange",
+        "Передайте JSON: {\"connection_id\": \"%s\", \"code\": \"<CODE>\"} внутри MCP." % connection_id,
+    ]
+    payload: Dict[str, Any] = {
+        "connection_id": connection_id,
+        "linked": bool(status.get("linked")),
+        "instructions": instructions,
+    }
+    if status.get("user_id") is not None:
+        payload["user_id"] = status["user_id"]
+    return payload
 
 
 @app.get("/link", name="link_page")
