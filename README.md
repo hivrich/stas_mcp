@@ -1,19 +1,21 @@
-# stas_mcp
+# STAS MCP Bridge (stub)
 
-This repository provides a minimal MCP-compatible FastAPI bridge exposing
-health, resources, tools, and an SSE feed.
+- Python FastAPI service compatible with MCP Connectors.
+- Endpoints: /healthz, /mcp/resource/{current.json,last_training.json,schema.plan.json}, /mcp/tool/{plan.validate,plan.publish,plan.delete}, /sse.
 
-## Quickstart
-
-Run locally with Python 3.11+:
-
+## Local run
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+. .venv/bin/activate
 pip install -r requirements.txt
-python src/server.py --host 0.0.0.0 --port 8787
+python -m uvicorn src.server:app --host 0.0.0.0 --port 8787
 ```
 
+## Smoke checks
+```bash
+curl -sS http://127.0.0.1:8787/healthz
+timeout 6 curl -Ns http://127.0.0.1:8787/sse | sed -n '1,20p'
+```
 The server listens on port `8787` by default and exposes the MCP endpoints
 under `/mcp` as well as `/sse` for streaming updates.
 
