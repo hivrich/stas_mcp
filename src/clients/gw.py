@@ -24,6 +24,10 @@ class GwUnavailable(GwError):
 class GwBadResponse(GwError):
     """Raised when the gateway returns unexpected data."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 _REQUEST_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
 _RETRY_ATTEMPTS = 2
@@ -133,7 +137,10 @@ async def _request_json(
         if response.status_code >= 500:
             raise GwUnavailable("gateway returned a server error")
         if response.status_code >= 400:
-            raise GwBadResponse(f"gateway responded with {response.status_code}")
+            raise GwBadResponse(
+                f"gateway responded with {response.status_code}",
+                status_code=response.status_code,
+            )
 
         try:
             return response.json()
