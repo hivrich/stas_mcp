@@ -44,3 +44,18 @@ Quick checks:
 
 UAT (production evidence): see [UAT_PROD.md](UAT_PROD.md).
 
+
+## Config (Bridge mode)
+Set env vars (e.g., in Render):
+
+- `BRIDGE_BASE`: `https://<your-auth-gateway>`
+- `BRIDGE_TOKEN`: `<optional bearer token>`
+- `USER_ID`: `<optional fixed user id>` — if set, linking is bypassed
+
+Linking (optional):
+
+Open `https://<host>/_/link` and save `connection_id ↔ user_id` for per-connection routing.
+
+Diagnostics:
+
+`https://<host>/_/whoami` → `{ "mode": "bridge"|"stub", ... }`

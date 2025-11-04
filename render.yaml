@@ -8,3 +8,9 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11
+      - key: BRIDGE_BASE
+        value: ""         # e.g. https://auth-gateway.example.com
+      - key: BRIDGE_TOKEN
+        value: ""         # optional Bearer token
+      - key: USER_ID
+        value: ""         # optional fallback user id (bypasses linking)
