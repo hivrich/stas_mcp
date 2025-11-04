@@ -770,8 +770,9 @@ async def sse(request: Request) -> EventSourceResponse:
 
 
 @app.get("/mcp")
-async def mcp_stream(request: Request) -> EventSourceResponse:
-    return _sse_response(request)
+async def mcp_get_manifest() -> JSONResponse:
+    manifest = build_manifest()
+    return JSONResponse(manifest, headers={"Access-Control-Allow-Origin": "*"})
 
 
 def main() -> None:  # pragma: no cover - CLI helper
