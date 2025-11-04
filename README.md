@@ -3,6 +3,11 @@
 - Python FastAPI service compatible with MCP Connectors.
 - Endpoints: /healthz, /mcp/resource/{current.json,last_training.json,schema.plan.json}, /mcp/tool/{plan.validate,plan.publish,plan.delete}, /sse.
 
+## Quickstart
+
+* Run `uvicorn src.server:app --reload`
+* Open https://stas-mcp.onrender.com/_/sse to visually watch manifest + ping.
+
 ## Local run
 ```bash
 python -m venv .venv

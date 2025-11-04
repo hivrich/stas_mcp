@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from sse_starlette.sse import EventSourceResponse
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -180,6 +180,73 @@ def _sse_stream() -> Iterable[Dict[str, Any]]:
 @app.get("/sse")
 def sse_endpoint() -> EventSourceResponse:
     return EventSourceResponse(_sse_stream())
+
+
+@app.get("/_/sse")
+def sse_viewer() -> Response:
+    html = """
+    <!DOCTYPE html>
+    <html lang=\"en\">
+    <head>
+        <meta charset=\"utf-8\" />
+        <title>SSE Viewer</title>
+        <style>
+            body { font-family: sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 1.5rem; }
+            h1 { font-size: 1.5rem; margin-bottom: 1rem; }
+            button { padding: 0.5rem 1rem; font-size: 1rem; }
+            textarea { width: 100%; height: 70vh; margin-top: 1rem; background: #020617; color: #a3e635; border: 1px solid #1e293b; padding: 0.5rem; font-family: monospace; resize: none; }
+        </style>
+    </head>
+    <body>
+        <h1>Server-Sent Events Viewer</h1>
+        <p>Click connect to stream events from <code>/sse</code>.</p>
+        <button id=\"connect\">Connect</button>
+        <textarea id=\"log\" readonly placeholder=\"Events will appear here...\"></textarea>
+        <script>
+            (function () {
+                const button = document.getElementById('connect');
+                const log = document.getElementById('log');
+                let source = null;
+
+                function append(line) {
+                    log.value += line + '\n';
+                    log.scrollTop = log.scrollHeight;
+                }
+
+                function handleEvent(event) {
+                    const data = (event.data || '').slice(0, 200);
+                    append(`[event] ${event.type || 'message'}    [data] ${data}`);
+                }
+
+                button.addEventListener('click', function () {
+                    if (source) {
+                        return;
+                    }
+                    button.disabled = true;
+                    append('[info] Connecting to /sse ...');
+                    source = new EventSource('/sse');
+                    source.onopen = function () {
+                        append('[info] Connected');
+                    };
+                    source.onerror = function () {
+                        append('[error] Connection error');
+                    };
+                    source.onmessage = handleEvent;
+                    source.addEventListener('manifest', handleEvent);
+                    source.addEventListener('ping', handleEvent);
+                });
+
+                window.addEventListener('beforeunload', function () {
+                    if (source) {
+                        source.close();
+                    }
+                });
+            })();
+        </script>
+    </body>
+    </html>
+    """
+    return Response(content=html, media_type="text/html")
 
 
 def main() -> None:
