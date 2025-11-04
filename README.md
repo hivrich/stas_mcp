@@ -65,3 +65,9 @@ UAT (production evidence): see [UAT_PROD.md](UAT_PROD.md).
 
 * [`/whoami`](https://stas-mcp.onrender.com/whoami) or [`/_/whoami`](https://stas-mcp.onrender.com/_/whoami)
 * [`/link`](https://stas-mcp.onrender.com/link) (with `?connection_id=` to pre-fill)
+
+## MCP HTTP endpoint
+- Public MCP URL: `https://<host>/mcp`
+- Transport: Streamable HTTP (JSON-RPC 2.0)
+- Methods: `initialize`, `tools/list`, `tools/call`
+- For browser clients, CORS is enabled; preflight: `OPTIONS /mcp`.
