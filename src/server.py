@@ -149,20 +149,52 @@ def build_manifest() -> Dict[str, Any]:
     return manifest
 
 
-def manifest_tools_to_rpc_tools(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
-    tools = manifest.get("tools") or manifest.get("actions") or []
-    rpc_tools: List[Dict[str, Any]] = []
-    for tool in tools:
-        rpc_tools.append(
-            {
-                "name": tool.get("id") or tool.get("name"),
-                "description": tool.get("description", ""),
-                "inputSchema": tool.get("input_schema")
-                or tool.get("inputSchema")
-                or {"type": "object"},
-            }
-        )
-    return rpc_tools
+def build_tools_for_rpc() -> List[Dict[str, Any]]:
+    plan_schema = load_schema()
+    return [
+        {
+            "name": "plan.validate",
+            "description": "Validate training plan draft against schema.plan.json",
+            "inputSchema": {
+                "$schema": MANIFEST_SCHEMA_URI,
+                "type": "object",
+                "required": ["draft"],
+                "properties": {
+                    "draft": plan_schema,
+                    "connection_id": {"type": "string"},
+                },
+            },
+        },
+        {
+            "name": "plan.publish",
+            "description": "Publish a plan; requires confirm:true; idempotent by external_id",
+            "inputSchema": {
+                "$schema": MANIFEST_SCHEMA_URI,
+                "type": "object",
+                "required": ["external_id", "draft", "confirm"],
+                "properties": {
+                    "external_id": {"type": "string"},
+                    "draft": plan_schema,
+                    "confirm": {"type": "boolean"},
+                    "connection_id": {"type": "string"},
+                },
+            },
+        },
+        {
+            "name": "plan.delete",
+            "description": "Delete a plan by external_id; requires confirm:true",
+            "inputSchema": {
+                "$schema": MANIFEST_SCHEMA_URI,
+                "type": "object",
+                "required": ["external_id", "confirm"],
+                "properties": {
+                    "external_id": {"type": "string"},
+                    "confirm": {"type": "boolean"},
+                    "connection_id": {"type": "string"},
+                },
+            },
+        },
+    ]
 
 
 def rpc_ok(rpc_id: Any, result: Any) -> JSONResponse:
@@ -184,10 +216,7 @@ def rpc_err(rpc_id: Any, code: int, message: str, data: Any = None) -> JSONRespo
 
 
 def _tool_json_content(result: Any) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {"content": [{"type": "json", "json": result}]}
-    if isinstance(result, dict) and not result.get("ok", True):
-        payload["isError"] = True
-    return payload
+    return {"content": [{"type": "json", "json": result}]}
 
 
 @app.options("/mcp")
@@ -196,7 +225,7 @@ async def mcp_options() -> Response:
         status_code=204,
         headers={
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
             "Access-Control-Allow-Headers": "*",
         },
     )
@@ -231,8 +260,7 @@ async def mcp_rpc(request: Request) -> JSONResponse:
         return rpc_ok(rpc_id, result)
 
     if method == "tools/list":
-        manifest = build_manifest()
-        tools = manifest_tools_to_rpc_tools(manifest)
+        tools = build_tools_for_rpc()
         return rpc_ok(rpc_id, {"tools": tools})
 
     if method == "tools/call":
