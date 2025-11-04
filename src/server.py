@@ -574,22 +574,32 @@ async def plan_delete(request: Request, payload: Dict[str, Any] = Body(...)) -> 
     return {"ok": True, "external_id": external_id, "window": window, "response": delete_response}
 
 
-@app.get("/sse")
-async def sse(request: Request) -> EventSourceResponse:
-    async def event_gen():
-        manifest = build_manifest()
-        yield {"event": "manifest", "data": json.dumps(manifest, ensure_ascii=False)}
-        while True:
-            if await request.is_disconnected():
-                break
-            yield {"event": "ping", "data": json.dumps({"ts": int(time.time())})}
-            await asyncio.sleep(15)
+async def _sse_event_generator(request: Request):
+    manifest = build_manifest()
+    yield {"event": "manifest", "data": json.dumps(manifest, ensure_ascii=False)}
+    while True:
+        if await request.is_disconnected():
+            break
+        yield {"event": "ping", "data": json.dumps({"ts": int(time.time())})}
+        await asyncio.sleep(15)
 
+
+def _sse_response(request: Request) -> EventSourceResponse:
     return EventSourceResponse(
-        event_gen(),
+        _sse_event_generator(request),
         media_type="text/event-stream",
         headers={"Access-Control-Allow-Origin": "*"},
     )
+
+
+@app.get("/sse")
+async def sse(request: Request) -> EventSourceResponse:
+    return _sse_response(request)
+
+
+@app.get("/mcp")
+async def mcp_stream(request: Request) -> EventSourceResponse:
+    return _sse_response(request)
 
 
 def main() -> None:  # pragma: no cover - CLI helper
