@@ -4,3 +4,4 @@ sse-starlette
 jsonschema
 orjson
 python-multipart
+httpx
