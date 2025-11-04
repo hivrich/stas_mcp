@@ -56,16 +56,13 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-_MANIFEST: Dict[str, Any] = {
-    "server": "stas-mcp-bridge",
-    "version": "1",
-    "mode": MODE,
-    "resources": [
-        {"name": "current.json", "path": "/mcp/resource/current.json", "method": "GET"},
-        {"name": "last_training.json", "path": "/mcp/resource/last_training.json", "method": "GET"},
-        {"name": "schema.plan.json", "path": "/mcp/resource/schema.plan.json", "method": "GET"},
-    ],
-    "actions": [
+MANIFEST_SCHEMA_URI = "http://json-schema.org/draft-07/schema#"
+
+
+def build_manifest() -> Dict[str, Any]:
+    plan_schema = load_schema()
+    mode = "bridge" if BRIDGE_BASE else "stub"
+    tools = [
         {
             "id": "plan.validate",
             "name": "plan.validate",
@@ -73,10 +70,11 @@ _MANIFEST: Dict[str, Any] = {
             "method": "POST",
             "path": "/mcp/tool/plan.validate",
             "input_schema": {
+                "$schema": MANIFEST_SCHEMA_URI,
                 "type": "object",
                 "required": ["draft"],
                 "properties": {
-                    "draft": {"type": "object"},
+                    "draft": plan_schema,
                     "connection_id": {"type": "string"},
                 },
             },
@@ -88,11 +86,12 @@ _MANIFEST: Dict[str, Any] = {
             "method": "POST",
             "path": "/mcp/tool/plan.publish",
             "input_schema": {
+                "$schema": MANIFEST_SCHEMA_URI,
                 "type": "object",
                 "required": ["external_id", "draft", "confirm"],
                 "properties": {
                     "external_id": {"type": "string"},
-                    "draft": {"type": "object"},
+                    "draft": plan_schema,
                     "confirm": {"type": "boolean"},
                     "connection_id": {"type": "string"},
                 },
@@ -101,10 +100,11 @@ _MANIFEST: Dict[str, Any] = {
         {
             "id": "plan.delete",
             "name": "plan.delete",
-            "description": "Delete a published plan by external_id; requires confirm:true",
+            "description": "Delete a plan by external_id; requires confirm:true",
             "method": "POST",
             "path": "/mcp/tool/plan.delete",
             "input_schema": {
+                "$schema": MANIFEST_SCHEMA_URI,
                 "type": "object",
                 "required": ["external_id", "confirm"],
                 "properties": {
@@ -114,8 +114,23 @@ _MANIFEST: Dict[str, Any] = {
                 },
             },
         },
-    ],
-}
+    ]
+    manifest = {
+        "server": {"name": "stas-mcp-bridge", "version": "1"},
+        "mode": mode,
+        "resources": [
+            {"name": "current.json", "path": "/mcp/resource/current.json", "method": "GET"},
+            {"name": "last_training.json", "path": "/mcp/resource/last_training.json", "method": "GET"},
+            {"name": "schema.plan.json", "path": "/mcp/resource/schema.plan.json", "method": "GET"},
+        ],
+        "tools": tools,
+        "actions": [
+            {k: v for k, v in t.items() if k in ("id", "name", "description", "method", "path", "input_schema")}
+            for t in tools
+        ],
+        "sse": {"path": "/sse"},
+    }
+    return manifest
 
 
 def _load_links() -> Dict[str, str]:
@@ -367,7 +382,13 @@ async def mcp_connect(request: Request, payload: Optional[Dict[str, Any]] = Body
     if not user_id:
         link_url = str(request.url_for("link_page")) + f"?connection_id={conn_id}"
         return {"type": "navigate", "uri": link_url}
-    return {"type": "connected", "manifest": _MANIFEST, "connection_id": conn_id}
+    manifest = build_manifest()
+    return {"type": "connected", "manifest": manifest, "connection_id": conn_id}
+
+
+@app.get("/mcp/manifest")
+async def http_manifest() -> JSONResponse:
+    return JSONResponse(build_manifest())
 
 
 @app.get("/mcp/resource/{name}")
@@ -553,16 +574,22 @@ async def plan_delete(request: Request, payload: Dict[str, Any] = Body(...)) -> 
     return {"ok": True, "external_id": external_id, "window": window, "response": delete_response}
 
 
-async def _sse_stream():
-    yield {"event": "manifest", "data": json.dumps(_MANIFEST)}
-    while True:
-        await asyncio.sleep(2)
-        yield {"event": "ping", "data": json.dumps({"ts": int(time.time())})}
-
-
 @app.get("/sse")
-async def sse_endpoint() -> EventSourceResponse:
-    return EventSourceResponse(_sse_stream(), media_type="text/event-stream")
+async def sse(request: Request) -> EventSourceResponse:
+    async def event_gen():
+        manifest = build_manifest()
+        yield {"event": "manifest", "data": json.dumps(manifest, ensure_ascii=False)}
+        while True:
+            if await request.is_disconnected():
+                break
+            yield {"event": "ping", "data": json.dumps({"ts": int(time.time())})}
+            await asyncio.sleep(15)
+
+    return EventSourceResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
 
 
 def main() -> None:  # pragma: no cover - CLI helper
