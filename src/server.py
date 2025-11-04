@@ -149,37 +149,43 @@ def build_manifest() -> Dict[str, Any]:
     return manifest
 
 
-def _with_camel_input_schema(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    for action in actions:
-        normalized = dict(action)
-        schema = normalized.get("input_schema") or normalized.get("inputSchema")
-        if schema is not None:
-            normalized["input_schema"] = schema
-            normalized["inputSchema"] = schema
-
-        action_id = normalized.get("id")
-        if action_id is None and "name" in normalized:
-            action_id = normalized["name"]
-            normalized["id"] = action_id
-        if action_id is not None and "name" not in normalized:
-            normalized["name"] = action_id
-
-        description = normalized.get("description")
-        if not isinstance(description, str):
-            normalized["description"] = "" if description is None else str(description)
-
-        out.append(normalized)
-    return out
+def _as_actions_from_tools(tools: list[dict]) -> list[dict]:
+    actions = []
+    for t in tools or []:
+        _id = t.get("id") or t.get("name")
+        _nm = t.get("name") or _id
+        _ds = t.get("description", "")
+        sch = t.get("input_schema") or t.get("inputSchema")
+        if sch is None:
+            sch = {"type": "object"}
+        actions.append(
+            {
+                "id": _id,
+                "name": _nm,
+                "description": _ds,
+                "input_schema": sch,
+                "inputSchema": sch,
+            }
+        )
+    return actions
 
 
-def _manifest_response() -> JSONResponse:
-    manifest = build_manifest()
-    if "actions" in manifest:
-        manifest["actions"] = _with_camel_input_schema(manifest["actions"])
-    if "tools" in manifest:
-        manifest["tools"] = _with_camel_input_schema(manifest["tools"])
-    return JSONResponse(manifest, headers={"Access-Control-Allow-Origin": "*"})
+def _normalize_manifest_for_ui(manifest: dict) -> dict:
+    m = dict(manifest or {})
+    tools = m.get("tools") or m.get("actions") or []
+    m["actions"] = _as_actions_from_tools(tools)
+    norm_tools = []
+    for t in tools:
+        t = dict(t)
+        sch = t.get("input_schema") or t.get("inputSchema")
+        if sch is not None:
+            t["input_schema"] = sch
+            t["inputSchema"] = sch
+        if "name" not in t and "id" in t:
+            t["name"] = t["id"]
+        norm_tools.append(t)
+    m["tools"] = norm_tools
+    return m
 
 
 def build_tools_for_rpc() -> List[Dict[str, Any]]:
@@ -593,7 +599,9 @@ async def mcp_connect(request: Request, payload: Optional[Dict[str, Any]] = Body
 
 @app.get("/mcp/manifest")
 async def http_manifest() -> JSONResponse:
-    return _manifest_response()
+    manifest = build_manifest()
+    manifest = _normalize_manifest_for_ui(manifest)
+    return JSONResponse(manifest, headers={"Access-Control-Allow-Origin": "*"})
 
 
 @app.get("/mcp/resource/{name}")
@@ -804,7 +812,9 @@ async def sse(request: Request) -> EventSourceResponse:
 
 @app.get("/mcp")
 async def mcp_get_manifest() -> JSONResponse:
-    return _manifest_response()
+    manifest = build_manifest()
+    manifest = _normalize_manifest_for_ui(manifest)
+    return JSONResponse(manifest, headers={"Access-Control-Allow-Origin": "*"})
 
 
 def main() -> None:  # pragma: no cover - CLI helper
