@@ -20,6 +20,7 @@ from starlette.middleware.cors import CORSMiddleware
 from .linking import get_status as linking_get_status
 from .linking import set_linked as linking_set_linked
 from .linking import set_pending as linking_set_pending
+from .mcp import tools_read as mcp_tools_read
 from .routes.read_user import router as read_user_router
 
 try:
@@ -80,7 +81,7 @@ def _draft_input_schema() -> Dict[str, Any]:
 
 def _base_tool_definitions() -> List[Dict[str, Any]]:
     draft_schema = _draft_input_schema()
-    return [
+    tools: List[Dict[str, Any]] = [
         {
             "id": "plan.validate",
             "name": "plan.validate",
@@ -127,6 +128,8 @@ def _base_tool_definitions() -> List[Dict[str, Any]]:
             },
         },
     ]
+    tools.extend(mcp_tools_read.get_tool_definitions())
+    return tools
 
 
 def build_manifest() -> Dict[str, Any]:
@@ -228,7 +231,7 @@ def _normalize_manifest_for_ui(manifest: dict) -> dict:
 
 def build_tools_for_rpc() -> List[Dict[str, Any]]:
     draft_schema = _draft_input_schema()
-    return [
+    tools: List[Dict[str, Any]] = [
         {
             "name": "plan.validate",
             "description": "Validate training plan draft against schema.plan.json",
@@ -272,6 +275,8 @@ def build_tools_for_rpc() -> List[Dict[str, Any]]:
             },
         },
     ]
+    tools.extend(mcp_tools_read.get_tool_definitions())
+    return tools
 
 
 def _mcp_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -296,7 +301,7 @@ def rpc_ok(rpc_id: Any, result: Any, *, status_code: int = 200) -> JSONResponse:
 
 def rpc_err(
     rpc_id: Any,
-    code: int,
+    code: int | str,
     message: str,
     data: Any = None,
     *,
@@ -385,6 +390,10 @@ async def mcp_rpc(request: Request) -> JSONResponse:
         )
 
         try:
+            if mcp_tools_read.has_tool(name):
+                result = await mcp_tools_read.call_tool(name, arguments)
+                return rpc_ok(rpc_id, result)
+
             if name == "plan.validate":
                 payload_in = dict(arguments)
                 if connection_id and not payload_in.get("connection_id"):
@@ -407,6 +416,8 @@ async def mcp_rpc(request: Request) -> JSONResponse:
                 return rpc_ok(rpc_id, _tool_json_content(result))
 
             return rpc_err(rpc_id, -32601, f"Method tools/call: unknown tool '{name}'")
+        except mcp_tools_read.ToolError as exc:
+            return rpc_err(rpc_id, exc.code, exc.message, exc.data)
         except Exception as exc:  # pragma: no cover - defensive guard
             return rpc_err(rpc_id, -32000, "Tool execution error", str(exc))
 
