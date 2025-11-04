@@ -149,6 +149,39 @@ def build_manifest() -> Dict[str, Any]:
     return manifest
 
 
+def _with_camel_input_schema(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for action in actions:
+        normalized = dict(action)
+        schema = normalized.get("input_schema") or normalized.get("inputSchema")
+        if schema is not None:
+            normalized["input_schema"] = schema
+            normalized["inputSchema"] = schema
+
+        action_id = normalized.get("id")
+        if action_id is None and "name" in normalized:
+            action_id = normalized["name"]
+            normalized["id"] = action_id
+        if action_id is not None and "name" not in normalized:
+            normalized["name"] = action_id
+
+        description = normalized.get("description")
+        if not isinstance(description, str):
+            normalized["description"] = "" if description is None else str(description)
+
+        out.append(normalized)
+    return out
+
+
+def _manifest_response() -> JSONResponse:
+    manifest = build_manifest()
+    if "actions" in manifest:
+        manifest["actions"] = _with_camel_input_schema(manifest["actions"])
+    if "tools" in manifest:
+        manifest["tools"] = _with_camel_input_schema(manifest["tools"])
+    return JSONResponse(manifest, headers={"Access-Control-Allow-Origin": "*"})
+
+
 def build_tools_for_rpc() -> List[Dict[str, Any]]:
     plan_schema = load_schema()
     return [
@@ -560,7 +593,7 @@ async def mcp_connect(request: Request, payload: Optional[Dict[str, Any]] = Body
 
 @app.get("/mcp/manifest")
 async def http_manifest() -> JSONResponse:
-    return JSONResponse(build_manifest())
+    return _manifest_response()
 
 
 @app.get("/mcp/resource/{name}")
@@ -771,8 +804,7 @@ async def sse(request: Request) -> EventSourceResponse:
 
 @app.get("/mcp")
 async def mcp_get_manifest() -> JSONResponse:
-    manifest = build_manifest()
-    return JSONResponse(manifest, headers={"Access-Control-Allow-Origin": "*"})
+    return _manifest_response()
 
 
 def main() -> None:  # pragma: no cover - CLI helper
