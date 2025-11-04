@@ -146,16 +146,37 @@ def build_manifest() -> Dict[str, Any]:
         "server": {"name": "stas-mcp-bridge", "version": "1"},
         "mode": mode,
         "resources": [
-            {"name": "current.json", "path": "/mcp/resource/current.json", "method": "GET"},
-            {"name": "last_training.json", "path": "/mcp/resource/last_training.json", "method": "GET"},
-            {"name": "schema.plan.json", "path": "/mcp/resource/schema.plan.json", "method": "GET"},
+            {
+                "name": "current.json",
+                "path": "/mcp/resource/current.json",
+                "method": "GET",
+            },
+            {
+                "name": "last_training.json",
+                "path": "/mcp/resource/last_training.json",
+                "method": "GET",
+            },
+            {
+                "name": "schema.plan.json",
+                "path": "/mcp/resource/schema.plan.json",
+                "method": "GET",
+            },
         ],
         "tools": tools,
         "actions": [
             {
                 k: v
                 for k, v in tool.items()
-                if k in ("id", "name", "description", "method", "path", "input_schema", "inputSchema")
+                if k
+                in (
+                    "id",
+                    "name",
+                    "description",
+                    "method",
+                    "path",
+                    "input_schema",
+                    "inputSchema",
+                )
             }
             for tool in tools
         ],
@@ -398,7 +419,9 @@ def _load_links() -> Dict[str, str]:
 
 
 def _save_links(data: Dict[str, str]) -> None:
-    LINKS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    LINKS_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def _append_audit(entry: Dict[str, Any]) -> None:
@@ -429,7 +452,9 @@ def _resolve_user_id(conn_id: Optional[str]) -> Optional[str]:
 
 def _bearer(uid: str) -> str:
     payload = json.dumps({"uid": int(uid)})
-    token = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+    token = (
+        base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+    )
     return f"t_{token}"
 
 
@@ -448,7 +473,9 @@ async def gw(
         "User-Agent": ua,
     }
     async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
-        response = await client.request(method.upper(), url, params=params, json=json_payload, headers=headers)
+        response = await client.request(
+            method.upper(), url, params=params, json=json_payload, headers=headers
+        )
         response.raise_for_status()
         if response.headers.get("content-type", "").startswith("application/json"):
             return response.json()
@@ -470,7 +497,11 @@ def _request_ua(request: Request) -> str:
 
 
 def _unique_days(events: Sequence[Dict[str, Any]]) -> int:
-    days = {str(event.get("start_date_local", ""))[:10] for event in events if isinstance(event, dict)}
+    days = {
+        str(event.get("start_date_local", ""))[:10]
+        for event in events
+        if isinstance(event, dict)
+    }
     return len({d for d in days if d})
 
 
@@ -493,10 +524,18 @@ def _build_events(draft: Dict[str, Any], external_id: str) -> List[Dict[str, Any
         if not isinstance(date, str) or not date:
             continue
         day_title = day.get("title") if isinstance(day.get("title"), str) else None
-        blocks = [block for block in day.get("blocks", []) if isinstance(block, dict)] if isinstance(day.get("blocks"), list) else []
+        blocks = (
+            [block for block in day.get("blocks", []) if isinstance(block, dict)]
+            if isinstance(day.get("blocks"), list)
+            else []
+        )
         target_blocks = blocks if blocks else [None]
         for block in target_blocks:
-            block_title = block.get("title") if isinstance(block, dict) and isinstance(block.get("title"), str) else None
+            block_title = (
+                block.get("title")
+                if isinstance(block, dict) and isinstance(block.get("title"), str)
+                else None
+            )
             events.append(
                 {
                     "start_date_local": f"{date}T09:00:00",
@@ -541,7 +580,15 @@ def _pick_last_training(payload: Any) -> Optional[Dict[str, Any]]:
     pool = finished or candidates
 
     def key(item: Dict[str, Any]) -> dt.datetime:
-        for field in ("finished_at", "completed_at", "end_at", "end_time", "start_time", "start_date_local", "date"):
+        for field in (
+            "finished_at",
+            "completed_at",
+            "end_at",
+            "end_time",
+            "start_time",
+            "start_date_local",
+            "date",
+        ):
             value = item.get(field)
             if isinstance(value, str):
                 parsed = _parse_iso(value)
@@ -573,7 +620,12 @@ def _link_hint(request: Request, connection_id: Optional[str]) -> Dict[str, Any]
         uri = f"{base}?connection_id={connection_id}"
     else:
         uri = base
-    return {"ok": False, "need_link": True, "hint": "Open /link and map connection_id→user_id", "uri": uri}
+    return {
+        "ok": False,
+        "need_link": True,
+        "hint": "Open /link and map connection_id→user_id",
+        "uri": uri,
+    }
 
 
 @app.get("/healthz")
@@ -604,7 +656,10 @@ def _linking_status(connection_id: str) -> Dict[str, Any]:
         try:
             linking_set_linked(connection_id, int(persisted))
         except (TypeError, ValueError):
-            logger.debug("Skipping persisted user_id that is not int for %s", _mask_connection_id(connection_id))
+            logger.debug(
+                "Skipping persisted user_id that is not int for %s",
+                _mask_connection_id(connection_id),
+            )
     status = linking_get_status(connection_id)
     if status.get("linked") and "user_id" not in status and persisted:
         try:
@@ -620,7 +675,10 @@ async def api_whoami(request: Request) -> Dict[str, Any]:
     if not connection_id:
         raise HTTPException(status_code=422, detail="connection_id is required")
     status = _linking_status(connection_id)
-    response: Dict[str, Any] = {"connection_id": connection_id, "linked": bool(status.get("linked"))}
+    response: Dict[str, Any] = {
+        "connection_id": connection_id,
+        "linked": bool(status.get("linked")),
+    }
     if status.get("user_id") is not None:
         response["user_id"] = status["user_id"]
     return response
@@ -634,7 +692,8 @@ async def api_link(connection_id: str = Query(..., min_length=1)) -> Dict[str, A
     instructions = [
         "Откройте страницу авторизации STAS и подтвердите доступ для соединения.",
         "Скопируйте одноразовый code и вызовите POST /auth/exchange",
-        "Передайте JSON: {\"connection_id\": \"%s\", \"code\": \"<CODE>\"} внутри MCP." % connection_id,
+        'Передайте JSON: {"connection_id": "%s", "code": "<CODE>"} внутри MCP.'
+        % connection_id,
     ]
     payload: Dict[str, Any] = {
         "connection_id": connection_id,
@@ -683,7 +742,9 @@ async def link_save(request: Request) -> Dict[str, Any]:
 
 
 @app.post("/mcp/connect")
-async def mcp_connect(request: Request, payload: Optional[Dict[str, Any]] = Body(default=None)) -> Dict[str, Any]:
+async def mcp_connect(
+    request: Request, payload: Optional[Dict[str, Any]] = Body(default=None)
+) -> Dict[str, Any]:
     payload = payload or {}
     conn_id = _resolve_connection_id(request, payload)
     if not conn_id:
@@ -758,7 +819,12 @@ async def resource_get(name: str, request: Request) -> Any:
 async def plan_validate(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     draft = _draft_from_payload(payload)
     if not draft:
-        return {"ok": False, "errors": [{"path": [], "message": "Invalid plan payload"}], "warnings": [], "diff": {}}
+        return {
+            "ok": False,
+            "errors": [{"path": [], "message": "Invalid plan payload"}],
+            "warnings": [],
+            "diff": {},
+        }
 
     errors = [
         {"path": list(error.absolute_path), "message": error.message}
@@ -768,12 +834,17 @@ async def plan_validate(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 
 
 @app.post("/mcp/tool/plan.publish")
-async def plan_publish(request: Request, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+async def plan_publish(
+    request: Request, payload: Dict[str, Any] = Body(...)
+) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {"ok": False, "error": "invalid_payload"}
 
     draft = _draft_from_payload(payload)
-    external_id = str(payload.get("external_id") or draft.get("external_id") or "").strip() or "plan:auto"
+    external_id = (
+        str(payload.get("external_id") or draft.get("external_id") or "").strip()
+        or "plan:auto"
+    )
     events = _build_events(draft, external_id)
 
     conn_id = _resolve_connection_id(request, payload)
@@ -782,13 +853,24 @@ async def plan_publish(request: Request, payload: Dict[str, Any] = Body(...)) ->
         return _link_hint(request, conn_id)
 
     if not events:
-        return {"ok": False, "error": "no_events", "hint": "Provide at least one day/block"}
+        return {
+            "ok": False,
+            "error": "no_events",
+            "hint": "Provide at least one day/block",
+        }
 
     ua = _request_ua(request)
     dry_params = {"external_id_prefix": "plan:", "dry_run": "true"}
     dry_body = {"events": events}
     try:
-        dry_response = await gw("POST", "/icu/events", uid=user_id, params=dry_params, json_payload=dry_body, ua=ua)
+        dry_response = await gw(
+            "POST",
+            "/icu/events",
+            uid=user_id,
+            params=dry_params,
+            json_payload=dry_body,
+            ua=ua,
+        )
     except httpx.HTTPError as exc:
         return {"ok": False, "error": str(exc), "stage": "dry_run"}
 
@@ -837,7 +919,9 @@ async def plan_publish(request: Request, payload: Dict[str, Any] = Body(...)) ->
 
 
 @app.post("/mcp/tool/plan.delete")
-async def plan_delete(request: Request, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+async def plan_delete(
+    request: Request, payload: Dict[str, Any] = Body(...)
+) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {"ok": False, "error": "invalid_payload"}
 
@@ -883,7 +967,12 @@ async def plan_delete(request: Request, payload: Dict[str, Any] = Body(...)) -> 
             "status": "ok",
         }
     )
-    return {"ok": True, "external_id": external_id, "window": window, "response": delete_response}
+    return {
+        "ok": True,
+        "external_id": external_id,
+        "window": window,
+        "response": delete_response,
+    }
 
 
 async def _sse_event_generator(request: Request):
