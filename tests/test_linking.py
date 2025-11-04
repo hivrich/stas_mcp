@@ -6,10 +6,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from linking import get_status, reset, set_linked  # noqa: E402
-from server import app  # noqa: E402
+from src.linking import get_status, reset, set_linked  # noqa: E402
+from src.server import app  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
