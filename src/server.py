@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import httpx
 from fastapi import Body, FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from jsonschema import Draft7Validator
 from sse_starlette.sse import EventSourceResponse
 from starlette.middleware.cors import CORSMiddleware
@@ -43,6 +43,8 @@ def load_schema() -> Dict[str, Any]:
 
 PLAN_SCHEMA = load_schema()
 PLAN_VALIDATOR = Draft7Validator(PLAN_SCHEMA)
+
+MCP_PROTOCOL_VERSION = "2025-06-18"
 
 BRIDGE_BASE = settings.BRIDGE_BASE.rstrip("/")
 MODE = "bridge" if BRIDGE_BASE else "stub"
@@ -131,6 +133,162 @@ def build_manifest() -> Dict[str, Any]:
         "sse": {"path": "/sse"},
     }
     return manifest
+
+
+def build_tools_for_rpc() -> List[Dict[str, Any]]:
+    plan_schema = load_schema()
+    return [
+        {
+            "name": "plan.validate",
+            "description": "Validate training plan draft against schema.plan.json",
+            "inputSchema": {
+                "$schema": MANIFEST_SCHEMA_URI,
+                "type": "object",
+                "required": ["draft"],
+                "properties": {
+                    "draft": plan_schema,
+                    "connection_id": {"type": "string"},
+                },
+            },
+        },
+        {
+            "name": "plan.publish",
+            "description": "Publish a plan; requires confirm:true; idempotent by external_id",
+            "inputSchema": {
+                "$schema": MANIFEST_SCHEMA_URI,
+                "type": "object",
+                "required": ["external_id", "draft", "confirm"],
+                "properties": {
+                    "external_id": {"type": "string"},
+                    "draft": plan_schema,
+                    "confirm": {"type": "boolean"},
+                    "connection_id": {"type": "string"},
+                },
+            },
+        },
+        {
+            "name": "plan.delete",
+            "description": "Delete a plan by external_id; requires confirm:true",
+            "inputSchema": {
+                "$schema": MANIFEST_SCHEMA_URI,
+                "type": "object",
+                "required": ["external_id", "confirm"],
+                "properties": {
+                    "external_id": {"type": "string"},
+                    "confirm": {"type": "boolean"},
+                    "connection_id": {"type": "string"},
+                },
+            },
+        },
+    ]
+
+
+def rpc_ok(rpc_id: Any, result: Any) -> JSONResponse:
+    return JSONResponse(
+        {"jsonrpc": "2.0", "id": rpc_id, "result": result},
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
+
+
+def rpc_err(rpc_id: Any, code: int, message: str, data: Any = None) -> JSONResponse:
+    payload: Dict[str, Any] = {
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "error": {"code": code, "message": message},
+    }
+    if data is not None:
+        payload["error"]["data"] = data
+    return JSONResponse(payload, status_code=400, headers={"Access-Control-Allow-Origin": "*"})
+
+
+def _tool_json_content(result: Any) -> Dict[str, Any]:
+    return {"content": [{"type": "json", "json": result}]}
+
+
+@app.options("/mcp")
+async def mcp_options() -> Response:
+    return Response(
+        status_code=204,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        },
+    )
+
+
+@app.post("/mcp")
+async def mcp_rpc(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+    except Exception as exc:  # pragma: no cover - defensive parsing
+        return rpc_err(None, -32700, "Parse error", str(exc))
+
+    if not isinstance(payload, dict):
+        return rpc_err(None, -32600, "Invalid request: expected object")
+
+    rpc_id = payload.get("id")
+    method = payload.get("method")
+    params = payload.get("params") or {}
+
+    if not isinstance(method, str):
+        return rpc_err(rpc_id, -32600, "Invalid request: method must be string")
+
+    if params and not isinstance(params, dict):
+        return rpc_err(rpc_id, -32602, "Invalid params: expected object")
+
+    if method == "initialize":
+        result = {
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": {"tools": {"listChanged": True}},
+            "serverInfo": {"name": "stas-mcp-bridge", "version": "1.0.0"},
+        }
+        return rpc_ok(rpc_id, result)
+
+    if method == "tools/list":
+        tools = build_tools_for_rpc()
+        return rpc_ok(rpc_id, {"tools": tools})
+
+    if method == "tools/call":
+        name = str(params.get("name") or "").strip()
+        arguments = params.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            return rpc_err(rpc_id, -32602, "Invalid params: arguments must be object")
+
+        connection_id = (
+            request.headers.get("x-connection-id")
+            or request.headers.get("x-conn")
+            or request.query_params.get("cid")
+            or arguments.get("connection_id")
+        )
+
+        try:
+            if name == "plan.validate":
+                payload_in = dict(arguments)
+                if connection_id and not payload_in.get("connection_id"):
+                    payload_in["connection_id"] = connection_id
+                result = await plan_validate(payload=payload_in)
+                return rpc_ok(rpc_id, _tool_json_content(result))
+
+            if name == "plan.publish":
+                payload_in = dict(arguments)
+                if connection_id and not payload_in.get("connection_id"):
+                    payload_in["connection_id"] = connection_id
+                result = await plan_publish(request, payload_in)
+                return rpc_ok(rpc_id, _tool_json_content(result))
+
+            if name == "plan.delete":
+                payload_in = dict(arguments)
+                if connection_id and not payload_in.get("connection_id"):
+                    payload_in["connection_id"] = connection_id
+                result = await plan_delete(request, payload_in)
+                return rpc_ok(rpc_id, _tool_json_content(result))
+
+            return rpc_err(rpc_id, -32601, f"Method tools/call: unknown tool '{name}'")
+        except Exception as exc:  # pragma: no cover - defensive guard
+            return rpc_err(rpc_id, -32000, "Tool execution error", str(exc))
+
+    return rpc_err(rpc_id, -32601, f"Unknown method '{method}'")
 
 
 def _load_links() -> Dict[str, str]:
