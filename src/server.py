@@ -61,17 +61,14 @@ app.add_middleware(
 MANIFEST_SCHEMA_URI = "http://json-schema.org/draft-07/schema#"
 
 
-def build_manifest() -> Dict[str, Any]:
-    plan_schema = load_schema()
-    mode = "bridge" if BRIDGE_BASE else "stub"
-    tools = [
+def _base_tool_definitions() -> List[Dict[str, Any]]:
+    plan_schema = json.loads(json.dumps(PLAN_SCHEMA))
+    return [
         {
             "id": "plan.validate",
             "name": "plan.validate",
             "description": "Validate training plan draft against schema.plan.json",
-            "method": "POST",
-            "path": "/mcp/tool/plan.validate",
-            "input_schema": {
+            "inputSchema": {
                 "$schema": MANIFEST_SCHEMA_URI,
                 "type": "object",
                 "required": ["draft"],
@@ -85,9 +82,7 @@ def build_manifest() -> Dict[str, Any]:
             "id": "plan.publish",
             "name": "plan.publish",
             "description": "Publish a plan; requires confirm:true; idempotent by external_id",
-            "method": "POST",
-            "path": "/mcp/tool/plan.publish",
-            "input_schema": {
+            "inputSchema": {
                 "$schema": MANIFEST_SCHEMA_URI,
                 "type": "object",
                 "required": ["external_id", "draft", "confirm"],
@@ -103,9 +98,7 @@ def build_manifest() -> Dict[str, Any]:
             "id": "plan.delete",
             "name": "plan.delete",
             "description": "Delete a plan by external_id; requires confirm:true",
-            "method": "POST",
-            "path": "/mcp/tool/plan.delete",
-            "input_schema": {
+            "inputSchema": {
                 "$schema": MANIFEST_SCHEMA_URI,
                 "type": "object",
                 "required": ["external_id", "confirm"],
@@ -117,6 +110,23 @@ def build_manifest() -> Dict[str, Any]:
             },
         },
     ]
+
+
+def build_manifest() -> Dict[str, Any]:
+    mode = "bridge" if BRIDGE_BASE else "stub"
+    base_tools = _base_tool_definitions()
+    tools = [
+        {
+            "id": tool["id"],
+            "name": tool["name"],
+            "description": tool["description"],
+            "method": "POST",
+            "path": f"/mcp/tool/{tool['name']}",
+            "input_schema": tool["inputSchema"],
+            "inputSchema": tool["inputSchema"],
+        }
+        for tool in base_tools
+    ]
     manifest = {
         "server": {"name": "stas-mcp-bridge", "version": "1"},
         "mode": mode,
@@ -127,8 +137,12 @@ def build_manifest() -> Dict[str, Any]:
         ],
         "tools": tools,
         "actions": [
-            {k: v for k, v in t.items() if k in ("id", "name", "description", "method", "path", "input_schema")}
-            for t in tools
+            {
+                k: v
+                for k, v in tool.items()
+                if k in ("id", "name", "description", "method", "path", "input_schema", "inputSchema")
+            }
+            for tool in tools
         ],
         "sse": {"path": "/sse"},
     }
