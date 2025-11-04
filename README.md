@@ -32,3 +32,15 @@ The latest local user acceptance test run is documented in
 4. After deploy, open the URL and check:
    - `/healthz` returns JSON
    - `/sse` shows `event: manifest` then `event: ping`
+
+## Live service
+
+Base URL: [https://stas-mcp.onrender.com](https://stas-mcp.onrender.com)
+
+Quick checks:
+
+* Health: [https://stas-mcp.onrender.com/healthz](https://stas-mcp.onrender.com/healthz)
+* SSE stream: [https://stas-mcp.onrender.com/sse](https://stas-mcp.onrender.com/sse)  (first event: `manifest`, then periodic `ping`)
+
+UAT (production evidence): see [UAT_PROD.md](UAT_PROD.md).
+
