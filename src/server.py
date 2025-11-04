@@ -1,72 +1,36 @@
+from __future__ import annotations
+
 import json
-import threading
 import time
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Generator, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List
 
 from fastapi import FastAPI, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
-ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+BASE_DIR = Path(__file__).resolve().parent
+ASSETS_DIR = BASE_DIR / "assets"
 SCHEMA_PATH = ASSETS_DIR / "schema.plan.json"
-AUDIT_LOG_PATH = DATA_DIR / "audit.log"
 
-PING_INTERVAL_SECONDS = 15
-
-
-def _load_schema() -> Dict[str, Any]:
-    text = SCHEMA_PATH.read_text(encoding="utf-8")
-    return json.loads(text)
-
-
-PLAN_SCHEMA = _load_schema()
-
-
-class AuditLogger:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-
-    def log(self, entry: Dict[str, Any]) -> None:
-        payload = dict(entry)
-        payload.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
-        line = json.dumps(payload, ensure_ascii=False)
-        with self._lock:
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
-
-
-class PlanStore:
-    def __init__(self) -> None:
-        self._responses: Dict[str, Dict[str, Any]] = {}
-        self._lock = threading.Lock()
-
-    def get(self, external_id: str) -> Optional[Dict[str, Any]]:
-        with self._lock:
-            stored = self._responses.get(external_id)
-            if stored is None:
-                return None
-            return dict(stored)
-
-    def upsert(self, external_id: str, response: Dict[str, Any]) -> None:
-        with self._lock:
-            self._responses[external_id] = dict(response)
-
-    def remove(self, external_id: str) -> None:
-        with self._lock:
-            self._responses.pop(external_id, None)
-
+with SCHEMA_PATH.open("r", encoding="utf-8") as handle:
+    PLAN_SCHEMA: Dict[str, Any] = json.load(handle)
 
 app = FastAPI()
-audit_logger = AuditLogger(AUDIT_LOG_PATH)
-plan_store = PlanStore()
 
 
-MANIFEST = {
+_CURRENT_RESOURCE = {
+    "external_id": "plan:current",
+    "athlete_id": "i-demo",
+    "week": "2025-W45",
+    "status": "ok",
+}
+
+_LAST_TRAINING_RESOURCE = {
+    "athlete_id": "i-demo",
+    "last": {"date": "2025-11-02", "type": "Run", "distance_km": 10},
+}
+
+_MANIFEST = {
     "resources": [
         {"name": "current.json", "path": "/mcp/resource/current.json"},
         {"name": "last_training.json", "path": "/mcp/resource/last_training.json"},
@@ -80,6 +44,55 @@ MANIFEST = {
 }
 
 
+_published_plans: Dict[str, Dict[str, Any]] = {}
+
+
+def _extract_plan(payload: Any) -> Dict[str, Any]:
+    if isinstance(payload, dict) and isinstance(payload.get("draft"), dict):
+        return payload["draft"]
+    if isinstance(payload, dict):
+        return {k: v for k, v in payload.items() if k != "confirm"}
+    raise HTTPException(status_code=400, detail={"ok": False, "error": "invalid_payload"})
+
+
+def _validate(plan: Dict[str, Any]) -> Dict[str, Any]:
+    errors: List[Dict[str, Any]] = []
+    if not isinstance(plan, dict):
+        errors.append({"path": [], "message": "plan must be an object"})
+        return {"ok": False, "errors": errors, "warnings": [], "diff": {}}
+
+    for field in ("external_id", "athlete_id", "days"):
+        if field not in plan:
+            errors.append({"path": [field], "message": "Missing required property"})
+
+    if "external_id" in plan and not isinstance(plan["external_id"], str):
+        errors.append({"path": ["external_id"], "message": "Must be a string"})
+    if "athlete_id" in plan and not isinstance(plan["athlete_id"], str):
+        errors.append({"path": ["athlete_id"], "message": "Must be a string"})
+    if "meta" in plan and not isinstance(plan["meta"], dict):
+        errors.append({"path": ["meta"], "message": "Must be an object"})
+
+    days = plan.get("days")
+    if not isinstance(days, list):
+        errors.append({"path": ["days"], "message": "Must be an array"})
+    else:
+        for index, day in enumerate(days):
+            if not isinstance(day, dict):
+                errors.append({"path": ["days", index], "message": "Must be an object"})
+                continue
+            for key in ("date", "title", "blocks"):
+                if key not in day:
+                    errors.append({"path": ["days", index, key], "message": "Missing required property"})
+            if "date" in day and not isinstance(day["date"], str):
+                errors.append({"path": ["days", index, "date"], "message": "Must be a string"})
+            if "title" in day and not isinstance(day["title"], str):
+                errors.append({"path": ["days", index, "title"], "message": "Must be a string"})
+            if "blocks" in day and not isinstance(day["blocks"], list):
+                errors.append({"path": ["days", index, "blocks"], "message": "Must be an array"})
+
+    return {"ok": not errors, "errors": errors, "warnings": [], "diff": {}}
+
+
 @app.get("/healthz")
 def healthz() -> Dict[str, Any]:
     return {"ok": True, "ts": int(time.time())}
@@ -87,12 +100,12 @@ def healthz() -> Dict[str, Any]:
 
 @app.get("/mcp/resource/current.json")
 def current_resource() -> Dict[str, Any]:
-    return {"ok": True, "athlete_id": "i-demo", "week": "2025-W45", "risks": []}
+    return _CURRENT_RESOURCE
 
 
 @app.get("/mcp/resource/last_training.json")
 def last_training_resource() -> Dict[str, Any]:
-    return {"ok": True, "last": {"date": "2025-11-02", "type": "Run", "km": 10}}
+    return _LAST_TRAINING_RESOURCE
 
 
 @app.get("/mcp/resource/schema.plan.json")
@@ -103,12 +116,8 @@ def schema_resource() -> Dict[str, Any]:
 @app.post("/mcp/tool/plan.validate")
 def plan_validate(request: Request) -> Dict[str, Any]:
     payload = request.json()
-    draft = _extract_draft(payload)
-    errors = _validate_draft(draft)
-    ok = not errors
-    response = {"ok": ok, "errors": errors, "warnings": [], "diff": {}}
-    audit_logger.log({"tool": "plan.validate", "ok": ok, "errors": errors, "payload": payload})
-    return response
+    plan = _extract_plan(payload)
+    return _validate(plan)
 
 
 @app.post("/mcp/tool/plan.publish")
@@ -116,124 +125,61 @@ def plan_publish(request: Request) -> Dict[str, Any]:
     payload = request.json()
     confirm = isinstance(payload, dict) and payload.get("confirm") is True
     if not confirm:
-        response = {"ok": False, "need_confirm": True, "hint": "Add confirm:true"}
-        audit_logger.log({"tool": "plan.publish", "ok": False, "reason": "missing_confirm", "payload": payload})
-        return response
+        return {"ok": False, "need_confirm": True, "hint": "Add confirm:true"}
 
-    draft = _extract_draft(payload)
-    errors = _validate_draft(draft)
-    if errors:
-        audit_logger.log({"tool": "plan.publish", "ok": False, "errors": errors, "payload": payload})
-        raise HTTPException(status_code=400, detail={"ok": False, "errors": errors})
+    plan = _extract_plan(payload)
+    validation = _validate(plan)
+    if not validation["ok"]:
+        raise HTTPException(status_code=400, detail=validation)
 
-    external_id = _resolve_external_id(payload, draft)
-    if external_id is None:
-        audit_logger.log({"tool": "plan.publish", "ok": False, "reason": "missing_external_id", "payload": payload})
-        raise HTTPException(status_code=400, detail={"ok": False, "errors": ["external_id is required"]})
+    external_id = plan.get("external_id")
+    if not isinstance(external_id, str):
+        raise HTTPException(
+            status_code=400,
+            detail={"ok": False, "errors": ["external_id is required"]},
+        )
 
-    existing = plan_store.get(external_id)
-    if existing:
-        audit_logger.log({"tool": "plan.publish", "ok": True, "external_id": external_id, "idempotent": True})
-        return existing
+    stored = _published_plans.get(external_id)
+    if stored is not None:
+        return stored
 
-    days = draft.get("days") if isinstance(draft, dict) else []
-    days_written = len(days) if isinstance(days, list) else 0
-    response = {
+    result = {
         "ok": True,
-        "days_written": days_written,
         "external_id": external_id,
-        "at": datetime.now(timezone.utc).isoformat(),
-        "source": "mcp-stub",
+        "status": "published",
+        "days_written": len(plan.get("days", [])) if isinstance(plan.get("days"), list) else 0,
     }
-    plan_store.upsert(external_id, response)
-    audit_logger.log({"tool": "plan.publish", "ok": True, "external_id": external_id, "days_written": days_written})
-    return response
+    _published_plans[external_id] = result
+    return result
 
 
 @app.post("/mcp/tool/plan.delete")
 def plan_delete(request: Request) -> Dict[str, Any]:
     payload = request.json()
     if not isinstance(payload, dict):
-        audit_logger.log({"tool": "plan.delete", "ok": False, "reason": "invalid_payload", "payload": payload})
         raise HTTPException(status_code=400, detail={"ok": False, "error": "invalid_payload"})
 
-    confirm = payload.get("confirm") is True
-    if not confirm:
-        response = {"ok": False, "need_confirm": True, "hint": "Add confirm:true"}
-        audit_logger.log({"tool": "plan.delete", "ok": False, "reason": "missing_confirm", "payload": payload})
-        return response
+    if payload.get("confirm") is not True:
+        return {"ok": False, "need_confirm": True, "hint": "Add confirm:true"}
 
     external_id = payload.get("external_id")
     if not isinstance(external_id, str):
-        audit_logger.log({"tool": "plan.delete", "ok": False, "reason": "missing_external_id", "payload": payload})
         raise HTTPException(status_code=400, detail={"ok": False, "error": "missing_external_id"})
 
-    plan_store.remove(external_id)
-    response = {"ok": True, "external_id": external_id}
-    audit_logger.log({"tool": "plan.delete", "ok": True, "external_id": external_id})
-    return response
+    _published_plans.pop(external_id, None)
+    return {"ok": True, "external_id": external_id}
+
+
+def _sse_stream() -> Iterable[Dict[str, Any]]:
+    yield {"event": "manifest", "data": json.dumps(_MANIFEST)}
+    while True:
+        time.sleep(2)
+        yield {"event": "ping", "data": json.dumps({"ts": int(time.time())})}
 
 
 @app.get("/sse")
 def sse_endpoint() -> EventSourceResponse:
-    return EventSourceResponse(_sse_event_generator)
-
-
-def _extract_draft(payload: Any) -> Any:
-    if isinstance(payload, dict) and "draft" in payload:
-        return payload["draft"]
-    return payload
-
-
-def _resolve_external_id(payload: Any, draft: Any) -> Optional[str]:
-    if isinstance(payload, dict) and isinstance(payload.get("external_id"), str):
-        return payload["external_id"]
-    if isinstance(draft, dict) and isinstance(draft.get("external_id"), str):
-        return draft["external_id"]
-    return None
-
-
-def _validate_draft(draft: Any) -> List[str]:
-    errors: List[str] = []
-    if not isinstance(draft, dict):
-        return ["draft must be an object"]
-
-    for field in ("external_id", "athlete_id", "days"):
-        if field not in draft:
-            errors.append(f"missing required field: {field}")
-
-    if "external_id" in draft and not isinstance(draft["external_id"], str):
-        errors.append("external_id must be a string")
-    if "athlete_id" in draft and not isinstance(draft["athlete_id"], str):
-        errors.append("athlete_id must be a string")
-    if "meta" in draft and not isinstance(draft["meta"], dict):
-        errors.append("meta must be an object")
-
-    days = draft.get("days")
-    if not isinstance(days, list):
-        errors.append("days must be an array")
-    else:
-        for idx, day in enumerate(days):
-            if not isinstance(day, dict):
-                errors.append(f"days[{idx}] must be an object")
-                continue
-            for key in ("date", "title", "blocks"):
-                if key not in day:
-                    errors.append(f"days[{idx}] missing required field: {key}")
-            if "date" in day and not isinstance(day["date"], str):
-                errors.append(f"days[{idx}].date must be a string")
-            if "title" in day and not isinstance(day["title"], str):
-                errors.append(f"days[{idx}].title must be a string")
-            if "blocks" in day and not isinstance(day["blocks"], list):
-                errors.append(f"days[{idx}].blocks must be an array")
-    return errors
-
-
-def _sse_event_generator() -> Iterable[Dict[str, Any]]:
-    yield {"event": "manifest", "data": json.dumps(MANIFEST)}
-    while True:
-        time.sleep(PING_INTERVAL_SECONDS)
-        yield {"event": "ping", "data": str(int(time.time()))}
+    return EventSourceResponse(_sse_stream())
 
 
 def main() -> None:
