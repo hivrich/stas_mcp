@@ -14,6 +14,7 @@ from fastapi import Body, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from jsonschema import Draft7Validator
 from sse_starlette.sse import EventSourceResponse
+from starlette.middleware.cors import CORSMiddleware
 
 try:
     from .config import settings
@@ -44,21 +45,75 @@ PLAN_SCHEMA = load_schema()
 PLAN_VALIDATOR = Draft7Validator(PLAN_SCHEMA)
 
 BRIDGE_BASE = settings.BRIDGE_BASE.rstrip("/")
-MODE = "bridge"
+MODE = "bridge" if BRIDGE_BASE else "stub"
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
 
 _MANIFEST: Dict[str, Any] = {
+    "server": "stas-mcp-bridge",
+    "version": "1",
     "mode": MODE,
     "resources": [
-        {"name": "current.json", "path": "/mcp/resource/current.json"},
-        {"name": "last_training.json", "path": "/mcp/resource/last_training.json"},
-        {"name": "schema.plan.json", "path": "/mcp/resource/schema.plan.json"},
+        {"name": "current.json", "path": "/mcp/resource/current.json", "method": "GET"},
+        {"name": "last_training.json", "path": "/mcp/resource/last_training.json", "method": "GET"},
+        {"name": "schema.plan.json", "path": "/mcp/resource/schema.plan.json", "method": "GET"},
     ],
-    "tools": [
-        {"name": "plan.validate", "path": "/mcp/tool/plan.validate", "method": "POST"},
-        {"name": "plan.publish", "path": "/mcp/tool/plan.publish", "method": "POST"},
-        {"name": "plan.delete", "path": "/mcp/tool/plan.delete", "method": "POST"},
+    "actions": [
+        {
+            "id": "plan.validate",
+            "name": "plan.validate",
+            "description": "Validate training plan draft against schema.plan.json",
+            "method": "POST",
+            "path": "/mcp/tool/plan.validate",
+            "input_schema": {
+                "type": "object",
+                "required": ["draft"],
+                "properties": {
+                    "draft": {"type": "object"},
+                    "connection_id": {"type": "string"},
+                },
+            },
+        },
+        {
+            "id": "plan.publish",
+            "name": "plan.publish",
+            "description": "Publish a plan; requires confirm:true; idempotent by external_id",
+            "method": "POST",
+            "path": "/mcp/tool/plan.publish",
+            "input_schema": {
+                "type": "object",
+                "required": ["external_id", "draft", "confirm"],
+                "properties": {
+                    "external_id": {"type": "string"},
+                    "draft": {"type": "object"},
+                    "confirm": {"type": "boolean"},
+                    "connection_id": {"type": "string"},
+                },
+            },
+        },
+        {
+            "id": "plan.delete",
+            "name": "plan.delete",
+            "description": "Delete a published plan by external_id; requires confirm:true",
+            "method": "POST",
+            "path": "/mcp/tool/plan.delete",
+            "input_schema": {
+                "type": "object",
+                "required": ["external_id", "confirm"],
+                "properties": {
+                    "external_id": {"type": "string"},
+                    "confirm": {"type": "boolean"},
+                    "connection_id": {"type": "string"},
+                },
+            },
+        },
     ],
 }
 
@@ -507,7 +562,7 @@ async def _sse_stream():
 
 @app.get("/sse")
 async def sse_endpoint() -> EventSourceResponse:
-    return EventSourceResponse(_sse_stream())
+    return EventSourceResponse(_sse_stream(), media_type="text/event-stream")
 
 
 def main() -> None:  # pragma: no cover - CLI helper
