@@ -20,6 +20,7 @@ from starlette.middleware.cors import CORSMiddleware
 from .linking import get_status as linking_get_status
 from .linking import set_linked as linking_set_linked
 from .linking import set_pending as linking_set_pending
+from .routes.read_user import router as read_user_router
 
 try:
     from .config import settings
@@ -64,6 +65,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(read_user_router)
 
 MANIFEST_SCHEMA_URI = "http://json-schema.org/draft-07/schema#"
 
