@@ -55,14 +55,21 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
 
 MANIFEST_SCHEMA_URI = "http://json-schema.org/draft-07/schema#"
 
 
+def _draft_input_schema() -> Dict[str, Any]:
+    schema = json.loads(json.dumps(PLAN_SCHEMA))
+    external_id_schema = schema.get("properties", {}).get("external_id")
+    if isinstance(external_id_schema, dict) and "description" not in external_id_schema:
+        external_id_schema["description"] = "External ID of the plan"
+    return schema
+
+
 def _base_tool_definitions() -> List[Dict[str, Any]]:
-    plan_schema = json.loads(json.dumps(PLAN_SCHEMA))
+    draft_schema = _draft_input_schema()
     return [
         {
             "id": "plan.validate",
@@ -73,7 +80,7 @@ def _base_tool_definitions() -> List[Dict[str, Any]]:
                 "type": "object",
                 "required": ["draft"],
                 "properties": {
-                    "draft": plan_schema,
+                    "draft": draft_schema,
                     "connection_id": {"type": "string"},
                 },
             },
@@ -88,7 +95,7 @@ def _base_tool_definitions() -> List[Dict[str, Any]]:
                 "required": ["external_id", "draft", "confirm"],
                 "properties": {
                     "external_id": {"type": "string"},
-                    "draft": plan_schema,
+                    "draft": draft_schema,
                     "confirm": {"type": "boolean"},
                     "connection_id": {"type": "string"},
                 },
@@ -189,7 +196,7 @@ def _normalize_manifest_for_ui(manifest: dict) -> dict:
 
 
 def build_tools_for_rpc() -> List[Dict[str, Any]]:
-    plan_schema = load_schema()
+    draft_schema = _draft_input_schema()
     return [
         {
             "name": "plan.validate",
@@ -199,7 +206,7 @@ def build_tools_for_rpc() -> List[Dict[str, Any]]:
                 "type": "object",
                 "required": ["draft"],
                 "properties": {
-                    "draft": plan_schema,
+                    "draft": draft_schema,
                     "connection_id": {"type": "string"},
                 },
             },
@@ -213,7 +220,7 @@ def build_tools_for_rpc() -> List[Dict[str, Any]]:
                 "required": ["external_id", "draft", "confirm"],
                 "properties": {
                     "external_id": {"type": "string"},
-                    "draft": plan_schema,
+                    "draft": draft_schema,
                     "confirm": {"type": "boolean"},
                     "connection_id": {"type": "string"},
                 },
@@ -236,14 +243,34 @@ def build_tools_for_rpc() -> List[Dict[str, Any]]:
     ]
 
 
-def rpc_ok(rpc_id: Any, result: Any) -> JSONResponse:
+def _mcp_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    headers: Dict[str, str] = {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+        "Access-Control-Allow-Origin": "*",
+        "Vary": "Origin",
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def rpc_ok(rpc_id: Any, result: Any, *, status_code: int = 200) -> JSONResponse:
     return JSONResponse(
         {"jsonrpc": "2.0", "id": rpc_id, "result": result},
-        headers={"Access-Control-Allow-Origin": "*"},
+        status_code=status_code,
+        headers=_mcp_headers(),
     )
 
 
-def rpc_err(rpc_id: Any, code: int, message: str, data: Any = None) -> JSONResponse:
+def rpc_err(
+    rpc_id: Any,
+    code: int,
+    message: str,
+    data: Any = None,
+    *,
+    status_code: int = 200,
+) -> JSONResponse:
     payload: Dict[str, Any] = {
         "jsonrpc": "2.0",
         "id": rpc_id,
@@ -251,7 +278,7 @@ def rpc_err(rpc_id: Any, code: int, message: str, data: Any = None) -> JSONRespo
     }
     if data is not None:
         payload["error"]["data"] = data
-    return JSONResponse(payload, status_code=400, headers={"Access-Control-Allow-Origin": "*"})
+    return JSONResponse(payload, status_code=status_code, headers=_mcp_headers())
 
 
 def _tool_json_content(result: Any) -> Dict[str, Any]:
@@ -261,17 +288,28 @@ def _tool_json_content(result: Any) -> Dict[str, Any]:
 @app.options("/mcp")
 async def mcp_options() -> Response:
     return Response(
-        status_code=204,
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-        },
+        status_code=200,
+        headers=_mcp_headers(
+            {
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+            }
+        ),
     )
 
 
 @app.post("/mcp")
 async def mcp_rpc(request: Request) -> JSONResponse:
+    content_type = request.headers.get("content-type", "")
+    media_type = content_type.split(";", 1)[0].strip().lower() if content_type else ""
+    if media_type != "application/json":
+        return rpc_err(
+            None,
+            -32600,
+            "Unsupported Media Type: expected application/json",
+            status_code=415,
+        )
+
     try:
         payload = await request.json()
     except Exception as exc:  # pragma: no cover - defensive parsing
