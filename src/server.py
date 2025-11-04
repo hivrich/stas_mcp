@@ -150,13 +150,50 @@ def build_manifest() -> Dict[str, Any]:
 
 
 def build_tools_for_rpc() -> List[Dict[str, Any]]:
+    plan_schema = load_schema()
     return [
         {
-            "name": tool["name"],
-            "description": tool["description"],
-            "inputSchema": tool["inputSchema"],
-        }
-        for tool in _base_tool_definitions()
+            "name": "plan.validate",
+            "description": "Validate training plan draft against schema.plan.json",
+            "inputSchema": {
+                "$schema": MANIFEST_SCHEMA_URI,
+                "type": "object",
+                "required": ["draft"],
+                "properties": {
+                    "draft": plan_schema,
+                    "connection_id": {"type": "string"},
+                },
+            },
+        },
+        {
+            "name": "plan.publish",
+            "description": "Publish a plan; requires confirm:true; idempotent by external_id",
+            "inputSchema": {
+                "$schema": MANIFEST_SCHEMA_URI,
+                "type": "object",
+                "required": ["external_id", "draft", "confirm"],
+                "properties": {
+                    "external_id": {"type": "string"},
+                    "draft": plan_schema,
+                    "confirm": {"type": "boolean"},
+                    "connection_id": {"type": "string"},
+                },
+            },
+        },
+        {
+            "name": "plan.delete",
+            "description": "Delete a plan by external_id; requires confirm:true",
+            "inputSchema": {
+                "$schema": MANIFEST_SCHEMA_URI,
+                "type": "object",
+                "required": ["external_id", "confirm"],
+                "properties": {
+                    "external_id": {"type": "string"},
+                    "confirm": {"type": "boolean"},
+                    "connection_id": {"type": "string"},
+                },
+            },
+        },
     ]
 
 
@@ -175,14 +212,11 @@ def rpc_err(rpc_id: Any, code: int, message: str, data: Any = None) -> JSONRespo
     }
     if data is not None:
         payload["error"]["data"] = data
-    return JSONResponse(payload, status_code=200, headers={"Access-Control-Allow-Origin": "*"})
+    return JSONResponse(payload, status_code=400, headers={"Access-Control-Allow-Origin": "*"})
 
 
 def _tool_json_content(result: Any) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {"content": [{"type": "json", "json": result}]}
-    if isinstance(result, dict) and not result.get("ok", True):
-        payload["isError"] = True
-    return payload
+    return {"content": [{"type": "json", "json": result}]}
 
 
 @app.options("/mcp")
@@ -227,7 +261,7 @@ async def mcp_rpc(request: Request) -> JSONResponse:
 
     if method == "tools/list":
         tools = build_tools_for_rpc()
-        return rpc_ok(rpc_id, {"tools": tools, "nextCursor": None})
+        return rpc_ok(rpc_id, {"tools": tools})
 
     if method == "tools/call":
         name = str(params.get("name") or "").strip()
