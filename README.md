@@ -42,20 +42,26 @@ Quick checks:
 * Health: [https://stas-mcp.onrender.com/healthz](https://stas-mcp.onrender.com/healthz)
 * SSE stream: [https://stas-mcp.onrender.com/sse](https://stas-mcp.onrender.com/sse)  (first event: `manifest`, then periodic `ping`)
 
+### Connect (ChatGPT → Connector)
+
+1. MCP Server URL: `https://stas-mcp.onrender.com/sse`
+2. Authentication: none required
+3. Press **Connect**. On first use you will be redirected to [`/link`](https://stas-mcp.onrender.com/link) to enter your STAS `user_id` (one time per connection).
+
+After the `user_id` is stored, the connector will call the MCP resources/tools using the linked identity.
+
+### What endpoints MCP calls
+
+Gateway base: `https://intervals.stas.run/gw`
+
+* `GET /gw/api/db/user_summary` → `/mcp/resource/current.json`
+* `GET /gw/trainings?oldest=…&newest=…` → `/mcp/resource/last_training.json`
+* `POST /gw/icu/events?external_id_prefix=plan:` → `/mcp/tool/plan.publish`
+* `DELETE /gw/icu/events?...` → `/mcp/tool/plan.delete`
+
 UAT (production evidence): see [UAT_PROD.md](UAT_PROD.md).
 
+### Diagnostics
 
-## Config (Bridge mode)
-Set env vars (e.g., in Render):
-
-- `BRIDGE_BASE`: `https://<your-auth-gateway>`
-- `BRIDGE_TOKEN`: `<optional bearer token>`
-- `USER_ID`: `<optional fixed user id>` — if set, linking is bypassed
-
-Linking (optional):
-
-Open `https://<host>/_/link` and save `connection_id ↔ user_id` for per-connection routing.
-
-Diagnostics:
-
-`https://<host>/_/whoami` → `{ "mode": "bridge"|"stub", ... }`
+* [`/whoami`](https://stas-mcp.onrender.com/whoami) or [`/_/whoami`](https://stas-mcp.onrender.com/_/whoami)
+* [`/link`](https://stas-mcp.onrender.com/link) (with `?connection_id=` to pre-fill)
