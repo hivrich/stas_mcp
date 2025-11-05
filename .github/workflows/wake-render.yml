@@ -1,0 +1,39 @@
+name: Wake Render (STAS MCP)
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # каждые 10 минут
+  workflow_dispatch:         # ручной запуск из вкладки Actions
+
+concurrency:
+  group: wake-render
+  cancel-in-progress: false
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Warm base URLs
+        run: |
+          set -euo pipefail
+          URLS=("https://stas-mcp.onrender.com/" "https://stas-mcp.onrender.com/healthz")
+          for U in "${URLS[@]}"; do
+            echo "==> warming $U"
+            for i in {1..5}; do
+              code=$(curl --http1.1 -sS -m 40 -o /dev/null -w "%{http_code}" "$U" || true)
+              echo "try $i -> $code"
+              if [ "$code" = "200" ]; then break; fi
+              sleep 10
+            done
+          done
+
+      - name: JSON-RPC initialize (sanity)
+        run: |
+          set -euo pipefail
+          BODY='{"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
+          code=$(curl --http1.1 -sS -m 50 -o /dev/null -w "%{http_code}" \
+                 -H 'content-type: application/json' \
+                 -d "$BODY" https://stas-mcp.onrender.com/mcp || true)
+          echo "initialize -> $code"
+          test "$code" = "200" || exit 1
