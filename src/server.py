@@ -43,8 +43,8 @@ def _args_to_obj(arguments: Any) -> Tuple[Dict[str, Any], bool]:
 def _okify(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload if "ok" in payload else {"ok": True, **payload}
 
-# ---------------- registry (каноника) ----------------
-# Внутренние ИМЕНА БЕЗ ТОЧЕК — их публикуем в tools/list
+# ---------------- registry (snake_case имена публикуем) ----------------
+
 TOOLS_REGISTRY: Dict[str, Any] = {
     "user_summary_fetch": user_summary_fetch,
     "user_last_training_fetch": user_last_training_fetch,
@@ -56,7 +56,7 @@ TOOLS_REGISTRY: Dict[str, Any] = {
     "plan_validate": plan_validate,
 }
 
-# Легаси-алиасы с точками — принимаем в tools/call, но НЕ публикуем
+# принимем и «легаси» имена с точками (для совместимости вызовов)
 LEGACY_ALIASES: Dict[str, str] = {
     "user.summary.fetch": "user_summary_fetch",
     "user.last_training.fetch": "user_last_training_fetch",
@@ -117,11 +117,12 @@ TOOLS_SCHEMAS: List[Dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
-    {"name":"plan_status","description":"Get current plan status","input_schema":{**JSON_SCHEMA_HDR,"properties":{},"required":[],"additionalProperties":False}},
-    {"name":"plan_update","description":"Update plan entities","input_schema":{**JSON_SCHEMA_HDR,"properties":{"patch":{"type":"object"}},"required":["patch"],"additionalProperties":False}},
-    {"name":"plan_publish","description":"Publish pending changes","input_schema":{**JSON_SCHEMA_HDR,"properties":{"note":{"type":"string"}},"required":[],"additionalProperties":False}},
-    {"name":"plan_delete","description":"Delete a plan item","input_schema":{**JSON_SCHEMA_HDR,"properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":False}},
-    {"name":"plan_validate","description":"Validate plan consistency","input_schema":{**JSON_SCHEMA_HDR,"properties":{},"required":[],"additionalProperties":False}},
+    # Для тулов без аргументов — даём просто {"type":"object"} без запретов
+    {"name":"plan_status",  "description":"Get current plan status",   "input_schema":{"type":"object"}},
+    {"name":"plan_update",  "description":"Update plan entities",      "input_schema":{**JSON_SCHEMA_HDR,"properties":{"patch":{"type":"object"}},"required":["patch"],"additionalProperties":False}},
+    {"name":"plan_publish", "description":"Publish pending changes",   "input_schema":{"type":"object"}},
+    {"name":"plan_delete",  "description":"Delete a plan item",        "input_schema":{**JSON_SCHEMA_HDR,"properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":False}},
+    {"name":"plan_validate","description":"Validate plan consistency", "input_schema":{"type":"object"}},
 ]
 
 # ---------------- health ----------------
@@ -152,10 +153,11 @@ async def mcp(request: Request):
 
     try:
         if method == "initialize":
-            # Минимум, который нужен ChatGPT для «Build actions…»
+            # важно: serverInfo обязателен для многих клиентов
             return _rpc_ok(id_, {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {"name": "stas-mcp", "version": app.version},
                 "meta": {"server": "stas-mcp"}
             })
 
