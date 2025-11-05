@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import re
 from base64 import urlsafe_b64encode
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import httpx
 
@@ -119,30 +121,50 @@ async def plan_update(
     dry_run: bool = False,
     if_match: str | None = None,
 ) -> Dict[str, Any]:
-    params: Dict[str, Any] = {"external_id": external_id}
-    if dry_run:
-        params["dry_run"] = "true"
+    normalized = _normalize_plan_external_id(external_id)
+    params: Dict[str, Any] = {
+        "external_id_prefix": "plan:",
+        "dry_run": "true" if dry_run else "false",
+    }
     headers: Dict[str, str] = {}
     if if_match is not None:
         headers["If-Match"] = if_match
+    payload = {"external_id": normalized, "patch": patch}
     return await _request_json(
-        "PATCH",
-        f"/icu/plan/{external_id}",
+        "POST",
+        "/icu/events",
         user_id=user_id,
         params=params,
-        json_payload={"patch": patch},
+        json_payload=payload,
         extra_headers=headers or None,
     )
 
 
 async def plan_status(*, user_id: int, external_id: str) -> Dict[str, Any]:
-    params = {"external_id": external_id}
-    return await _request_json(
+    normalized = _normalize_plan_external_id(external_id)
+    window = _status_window(normalized)
+    params = {
+        "oldest": window["oldest"],
+        "newest": window["newest"],
+        "category": "WORKOUT",
+    }
+    data = await _request_json(
         "GET",
-        f"/icu/plan/{external_id}",
+        "/icu/events",
         user_id=user_id,
         params=params,
     )
+    events = _ensure_list_of_dicts(data, "plan events")
+    for event in events:
+        if str(event.get("external_id")) != normalized:
+            continue
+        result: Dict[str, Any] = {"status": "published"}
+        if etag := _hash_event_payload(event):
+            result["etag"] = etag
+        if updated := _event_updated_at(event):
+            result["updated_at"] = updated
+        return result
+    return {"status": "missing"}
 
 
 async def plan_list(
@@ -154,21 +176,44 @@ async def plan_list(
     limit: int = 50,
     cursor: str | None = None,
 ) -> Dict[str, Any]:
-    params: Dict[str, Any] = {"limit": str(limit)}
-    if athlete_id:
-        params["athlete_id"] = athlete_id
-    if date_from:
-        params["date_from"] = date_from
-    if date_to:
-        params["date_to"] = date_to
-    if cursor:
-        params["cursor"] = cursor
-    return await _request_json(
+    today = date.today()
+    oldest = today - timedelta(days=30)
+    params = {
+        "oldest": (date_from or oldest.isoformat()),
+        "newest": (date_to or today.isoformat()),
+        "category": "WORKOUT",
+    }
+
+    data = await _request_json(
         "GET",
-        "/icu/plan",
+        "/icu/events",
         user_id=user_id,
         params=params,
     )
+    events = _ensure_list_of_dicts(data, "plan events")
+
+    filtered = [
+        _summarize_plan_event(event)
+        for event in events
+        if isinstance(event.get("external_id"), str)
+        and str(event["external_id"]).startswith("plan:")
+    ]
+
+    if athlete_id:
+        filtered = [item for item in filtered if item.get("athlete_id") == athlete_id]
+
+    filtered.sort(key=lambda item: item.get("updated_at_sort"), reverse=True)
+
+    start_index = _decode_cursor(cursor)
+    end_index = start_index + max(0, int(limit))
+    page = filtered[start_index:end_index]
+    next_cursor: str | None = None
+    if end_index < len(filtered):
+        next_cursor = str(end_index)
+
+    items = [{k: v for k, v in item.items() if k != "updated_at_sort"} for item in page]
+
+    return {"items": items, "next_cursor": next_cursor}
 
 
 async def _request_json(
@@ -270,6 +315,79 @@ def _extract_date(training: Dict[str, Any]) -> Optional[date]:
             except ValueError:
                 return None
     return None
+
+
+def _normalize_plan_external_id(external_id: str) -> str:
+    if external_id.startswith("plan:"):
+        return external_id
+    return f"plan:{external_id}" if external_id else "plan:auto"
+
+
+def _status_window(external_id: str) -> Dict[str, str]:
+    today = date.today()
+    match = re.match(r"^plan:(\d{4}-\d{2}-\d{2})(?::.*)?$", external_id)
+    if match:
+        try:
+            day = date.fromisoformat(match.group(1))
+        except ValueError:
+            pass
+        else:
+            iso = day.isoformat()
+            return {"oldest": iso, "newest": iso}
+    oldest = (today - timedelta(days=7)).isoformat()
+    newest = (today + timedelta(days=7)).isoformat()
+    return {"oldest": oldest, "newest": newest}
+
+
+def _hash_event_payload(event: Mapping[str, Any]) -> str | None:
+    payload = event.get("payload")
+    if isinstance(payload, (dict, list)):
+        try:
+            serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError):
+            return None
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    return None
+
+
+def _event_updated_at(event: Mapping[str, Any]) -> str | None:
+    for key in ("updated_at", "modified_at", "created_at", "start_date_local"):
+        value = event.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            return value
+        if isinstance(value, datetime):
+            return value.isoformat()
+    return None
+
+
+def _summarize_plan_event(event: Mapping[str, Any]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {
+        "external_id": event.get("external_id"),
+        "status": event.get("status", "published"),
+    }
+    if "athlete_id" in event:
+        summary["athlete_id"] = event.get("athlete_id")
+    if etag := _hash_event_payload(event):
+        summary["etag"] = etag
+    updated_at = _event_updated_at(event)
+    if updated_at:
+        summary["updated_at"] = updated_at
+        summary["updated_at_sort"] = updated_at
+    else:
+        summary["updated_at_sort"] = ""
+    return summary
+
+
+def _decode_cursor(cursor: str | None) -> int:
+    if not cursor:
+        return 0
+    try:
+        value = int(cursor)
+    except (TypeError, ValueError):
+        return 0
+    return max(value, 0)
 
 
 __all__ = [
