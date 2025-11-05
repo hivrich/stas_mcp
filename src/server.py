@@ -20,7 +20,9 @@ from starlette.middleware.cors import CORSMiddleware
 from .linking import get_status as linking_get_status
 from .linking import set_linked as linking_set_linked
 from .linking import set_pending as linking_set_pending
+from .mcp import resources_user as mcp_resources_user
 from .mcp import tools_read as mcp_tools_read
+from .mcp import tools_session as mcp_tools_session
 from .routes.read_user import router as read_user_router
 
 try:
@@ -133,7 +135,8 @@ def _combined_tool_definitions() -> List[Dict[str, Any]]:
     draft_schema = _draft_input_schema()
     plan_tools = _plan_tool_definitions(draft_schema)
     read_tools = mcp_tools_read.get_tool_definitions()
-    return [*plan_tools, *read_tools]
+    session_tools = mcp_tools_session.get_tool_definitions()
+    return [*plan_tools, *read_tools, *session_tools]
 
 
 def build_manifest() -> Dict[str, Any]:
@@ -151,26 +154,27 @@ def build_manifest() -> Dict[str, Any]:
         }
         for tool in base_tools
     ]
+    resource_entries = [
+        {
+            "name": resource["uri"],
+            "path": f"/mcp/resource/{resource['uri']}",
+            "method": "GET",
+            "description": resource.get("description", ""),
+        }
+        for resource in mcp_resources_user.list_resources()
+    ]
+    resource_entries.append(
+        {
+            "name": "schema.plan.json",
+            "path": "/mcp/resource/schema.plan.json",
+            "method": "GET",
+        }
+    )
+
     manifest = {
         "server": {"name": "stas-mcp-bridge", "version": "1"},
         "mode": mode,
-        "resources": [
-            {
-                "name": "current.json",
-                "path": "/mcp/resource/current.json",
-                "method": "GET",
-            },
-            {
-                "name": "last_training.json",
-                "path": "/mcp/resource/last_training.json",
-                "method": "GET",
-            },
-            {
-                "name": "schema.plan.json",
-                "path": "/mcp/resource/schema.plan.json",
-                "method": "GET",
-            },
-        ],
+        "resources": resource_entries,
         "tools": tools,
         "actions": [
             {
@@ -236,6 +240,7 @@ def _normalize_manifest_for_ui(manifest: dict) -> dict:
 def build_tools_for_rpc() -> List[Dict[str, Any]]:
     plan_tools = _plan_tool_definitions(_draft_input_schema())
     read_tools = mcp_tools_read.get_tool_definitions()
+    session_tools = mcp_tools_session.get_tool_definitions()
     tools: List[Dict[str, Any]] = [
         {
             "name": tool["name"],
@@ -245,6 +250,7 @@ def build_tools_for_rpc() -> List[Dict[str, Any]]:
         for tool in plan_tools
     ]
     tools.extend(read_tools)
+    tools.extend(session_tools)
     return tools
 
 
@@ -308,9 +314,7 @@ def _manifest_response() -> JSONResponse:
     manifest = _normalize_manifest_for_ui(manifest)
     return JSONResponse(
         manifest,
-        headers=_mcp_headers(
-            {"Access-Control-Allow-Methods": "GET, POST, OPTIONS"}
-        ),
+        headers=_mcp_headers({"Access-Control-Allow-Methods": "GET, POST, OPTIONS"}),
     )
 
 
@@ -375,6 +379,10 @@ async def mcp_rpc(request: Request) -> JSONResponse:
         )
 
         try:
+            if mcp_tools_session.has_tool(name):
+                result = await mcp_tools_session.call_tool(name, arguments)
+                return rpc_ok(rpc_id, result)
+
             if mcp_tools_read.has_tool(name):
                 result = await mcp_tools_read.call_tool(name, arguments)
                 return rpc_ok(rpc_id, result)
@@ -405,6 +413,24 @@ async def mcp_rpc(request: Request) -> JSONResponse:
             return rpc_err(rpc_id, exc.code, exc.message, exc.data)
         except Exception as exc:  # pragma: no cover - defensive guard
             return rpc_err(rpc_id, -32000, "Tool execution error", str(exc))
+
+    if method == "resources/list":
+        resources = mcp_resources_user.list_resources()
+        return rpc_ok(rpc_id, {"resources": resources})
+
+    if method == "resources/read":
+        uri = params.get("uri")
+        if not isinstance(uri, str) or not uri.strip():
+            return rpc_err(
+                rpc_id, -32602, "Invalid params: uri must be a non-empty string"
+            )
+        try:
+            result = await mcp_resources_user.read_resource(uri.strip())
+        except mcp_resources_user.ResourceError as exc:
+            return rpc_err(rpc_id, exc.code, exc.message, exc.data)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            return rpc_err(rpc_id, -32001, "Resource read error", str(exc))
+        return rpc_ok(rpc_id, result)
 
     return rpc_err(rpc_id, -32601, f"Unknown method '{method}'")
 

@@ -6,6 +6,7 @@ import json
 from typing import Any, Dict, List, Mapping, Optional
 
 from src.clients import gw
+from src.session import store as session_store
 
 _DEFAULT_RANGE_DAYS = 14
 
@@ -40,7 +41,6 @@ _TOOL_DEFINITIONS = (
         input_schema={
             "$schema": "http://json-schema.org/draft-07/schema#",
             "type": "object",
-            "required": ["user_id"],
             "properties": {
                 "user_id": {"type": "integer"},
             },
@@ -52,7 +52,6 @@ _TOOL_DEFINITIONS = (
         input_schema={
             "$schema": "http://json-schema.org/draft-07/schema#",
             "type": "object",
-            "required": ["user_id"],
             "properties": {
                 "user_id": {"type": "integer"},
                 "oldest": {
@@ -90,10 +89,7 @@ async def call_tool(name: str, arguments: Mapping[str, Any]) -> Any:
     raise ToolError("InvalidParams", f"Unknown tool '{name}'")
 
 
-def _coerce_user_id(arguments: Mapping[str, Any]) -> int:
-    if "user_id" not in arguments:
-        raise ToolError("InvalidParams", "user_id is required")
-    value = arguments["user_id"]
+def _normalize_user_id(value: Any) -> int:
     if isinstance(value, bool):
         raise ToolError("InvalidParams", "user_id must be an integer")
     try:
@@ -103,6 +99,19 @@ def _coerce_user_id(arguments: Mapping[str, Any]) -> int:
     if user_id < 0:
         raise ToolError("InvalidParams", "user_id must be non-negative")
     return user_id
+
+
+def _coerce_user_id(arguments: Mapping[str, Any]) -> int:
+    if "user_id" in arguments:
+        return _normalize_user_id(arguments["user_id"])
+
+    stored = session_store.get_user_id()
+    if stored is None:
+        raise ToolError(
+            "InvalidParams",
+            "user_id is required; call session.set_user_id(user_id) first or pass user_id",
+        )
+    return _normalize_user_id(stored)
 
 
 def _parse_date(arguments: Mapping[str, Any], key: str) -> Optional[date]:
@@ -169,7 +178,9 @@ def _stringify_summary(raw_summary: Any) -> str:
         return payload
 
     try:
-        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+        return json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"), default=str
+        )
     except TypeError:
         return str(payload)
 

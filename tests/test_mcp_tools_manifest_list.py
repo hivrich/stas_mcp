@@ -30,6 +30,7 @@ async def test_tools_list_includes_read_tools() -> None:
     names = {tool["name"] for tool in tools}
     assert "user.summary.fetch" in names
     assert "user.last_training.fetch" in names
+    assert "session.set_user_id" in names
 
 
 @pytest.mark.anyio
@@ -45,3 +46,4 @@ async def test_http_manifest_includes_read_tools() -> None:
     names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
     assert "user.summary.fetch" in names
     assert "user.last_training.fetch" in names
+    assert "session.set_user_id" in names
