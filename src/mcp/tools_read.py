@@ -1,255 +1,224 @@
+# src/mcp/tools_read.py
+# STAS MCP — read tools (returns proper JSON content), retries, no TaskGroup.
+# Tools: user.summary.fetch, user.last_training.fetch, plan.list
+
 from __future__ import annotations
-
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+import asyncio
+import base64
+import datetime as dt
 import json
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from src.clients import gw
-from src.session import store as session_store
+import httpx
 
-_DEFAULT_RANGE_DAYS = 14
-
-
-@dataclass(slots=True)
-class ToolDefinition:
-    name: str
-    description: str
-    input_schema: Dict[str, Any]
-
-    def as_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.name,
-            "name": self.name,
-            "description": self.description,
-            "inputSchema": self.input_schema,
-        }
+MANIFEST_SCHEMA_URI = "http://json-schema.org/draft-07/schema#"
+BRIDGE_BASE = "https://intervals.stas.run/gw"
 
 
-class ToolError(RuntimeError):
-    def __init__(self, code: str, message: str, data: Any | None = None) -> None:
+# ---------- error type forwarded to server ----------
+class ToolError(Exception):
+    def __init__(self, code: int, message: str, data: Any | None = None):
         super().__init__(message)
         self.code = code
         self.message = message
         self.data = data
 
 
-_TOOL_DEFINITIONS = (
-    ToolDefinition(
-        name="user.summary.fetch",
-        description="Fetch read-only summary for a user by user_id (returns plain text summary).",
-        input_schema={
-            "$schema": "http://json-schema.org/draft-07/schema#",
+# ---------- helpers ----------
+def _ok_json(obj: Any) -> Dict[str, Any]:
+    # server expects already-wrapped MCP content
+    return {"content": [{"type": "json", "json": obj}]}
+
+def _mk_token(user_id: int) -> str:
+    payload = {"uid": int(user_id)}
+    b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    return f"t_{b64}"
+
+async def _retry(fn, attempts: int = 2, delay: float = 0.3):
+    last_exc = None
+    for i in range(attempts):
+        try:
+            return await fn()
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if i + 1 < attempts:
+                await asyncio.sleep(delay)
+    raise last_exc  # type: ignore[misc]
+
+def _today_utc_date() -> dt.date:
+    return dt.datetime.utcnow().date()
+
+
+# ---------- low-level GW calls ----------
+async def _gw_get_json(path: str, token: str, params: Dict[str, Any] | None = None, timeout: float = 25.0) -> Any:
+    async with httpx.AsyncClient(base_url=BRIDGE_BASE, timeout=timeout) as cli:
+        r = await cli.get(path, headers={"authorization": f"Bearer {token}", "accept": "application/json"}, params=params or {})
+        r.raise_for_status()
+        return r.json()
+
+
+# ---------- high-level reads ----------
+async def _read_user_summary(user_id: int) -> Any:
+    token = _mk_token(user_id)
+
+    async def once():
+        return await _gw_get_json("/api/db/user_summary", token)
+
+    # Спецификация: делаем один скрытый повтор и используем второй ответ.
+    first = await _retry(once, attempts=1)
+    try:
+        second = await _retry(once, attempts=1)
+        return second
+    except Exception:
+        return first
+
+async def _read_trainings(user_id: int, oldest: Optional[str], newest: Optional[str]) -> Tuple[List[dict], Dict[str, str]]:
+    token = _mk_token(user_id)
+    if not newest:
+        newest = _today_utc_date().isoformat()
+    if not oldest:
+        d_new = dt.date.fromisoformat(newest)
+        oldest = (d_new - dt.timedelta(days=13)).isoformat()
+
+    params = {"oldest": oldest, "newest": newest}
+    data = await _retry(lambda: _gw_get_json("/trainings", token, params=params))
+    items = data if isinstance(data, list) else []
+    return items, {"oldest": oldest, "newest": newest}
+
+async def _read_plan_events(user_id: int, oldest: Optional[str], newest: Optional[str]) -> Tuple[List[dict], Dict[str, str]]:
+    token = _mk_token(user_id)
+
+    # По умолчанию читаем текущую неделю (пн..вс) по UTC
+    if not newest:
+        today = _today_utc_date()
+        week_start = today - dt.timedelta(days=today.weekday())
+        week_end = week_start + dt.timedelta(days=6)
+        oldest = oldest or week_start.isoformat()
+        newest = week_end.isoformat()
+    elif not oldest:
+        d_new = dt.date.fromisoformat(newest)
+        oldest = (d_new - dt.timedelta(days=6)).isoformat()
+
+    # Правило: плановые тренировки — calendar events категории WORKOUT
+    params = {"oldest": oldest, "newest": newest, "category": "WORKOUT"}
+    raw = await _retry(lambda: _gw_get_json("/icu/events", token, params=params))
+    events = raw if isinstance(raw, list) else []
+
+    # Фильтрация: только плановые
+    filtered: List[dict] = []
+    for e in events:
+        cat = (e or {}).get("category")
+        ext = (e or {}).get("external_id") or ""
+        if cat in ("WORKOUT", "PLAN") or (isinstance(ext, str) and ext.startswith("plan:")):
+            filtered.append(e)
+
+    # Отсортировать и вернуть
+    def _sort_key(ev: dict) -> Tuple[str, str]:
+        return ((ev or {}).get("date") or "", (ev or {}).get("start_date_local") or "")
+    filtered.sort(key=_sort_key)
+    return filtered, {"oldest": oldest or "", "newest": newest or ""}
+
+
+# ---------- tool definitions ----------
+_TOOLS: Dict[str, Dict[str, Any]] = {
+    "user.summary.fetch": {
+        "name": "user.summary.fetch",
+        "description": "Read user summary from STAS GW; returns JSON content",
+        "inputSchema": {
+            "$schema": MANIFEST_SCHEMA_URI,
             "type": "object",
+            "required": ["user_id"],
             "properties": {
                 "user_id": {"type": "integer"},
+                "connection_id": {"type": "string"},
             },
         },
-    ),
-    ToolDefinition(
-        name="user.last_training.fetch",
-        description="Fetch the user's trainings within a date window (default last 14 days).",
-        input_schema={
-            "$schema": "http://json-schema.org/draft-07/schema#",
+    },
+    "user.last_training.fetch": {
+        "name": "user.last_training.fetch",
+        "description": "Read trainings in a window (default last 14 days) and return last finished",
+        "inputSchema": {
+            "$schema": MANIFEST_SCHEMA_URI,
             "type": "object",
+            "required": ["user_id"],
             "properties": {
                 "user_id": {"type": "integer"},
-                "oldest": {
-                    "type": "string",
-                    "pattern": r"^\\d{4}-\\d{2}-\\d{2}$",
-                    "description": "Start date (YYYY-MM-DD)",
-                },
-                "newest": {
-                    "type": "string",
-                    "pattern": r"^\\d{4}-\\d{2}-\\d{2}$",
-                    "description": "End date (YYYY-MM-DD)",
-                },
+                "oldest": {"type": "string"},
+                "newest": {"type": "string"},
+                "connection_id": {"type": "string"},
             },
         },
-    ),
-)
-
-
-_TOOL_HANDLERS = {definition.name: definition for definition in _TOOL_DEFINITIONS}
-
+    },
+    "plan.list": {
+        "name": "plan.list",
+        "description": "List plan events (WORKOUT|PLAN) in a range; defaults to current week",
+        "inputSchema": {
+            "$schema": MANIFEST_SCHEMA_URI,
+            "type": "object",
+            "required": ["athlete_id"],
+            "properties": {
+                "athlete_id": {"type": ["integer", "string"]},
+                "oldest": {"type": "string"},
+                "newest": {"type": "string"},
+                "limit": {"type": "integer"},
+                "connection_id": {"type": "string"},
+            },
+        },
+    },
+}
 
 def get_tool_definitions() -> List[Dict[str, Any]]:
-    return [definition.as_dict() for definition in _TOOL_DEFINITIONS]
-
+    return [_TOOLS[k] for k in ("user.summary.fetch", "user.last_training.fetch", "plan.list")]
 
 def has_tool(name: str) -> bool:
-    return name in _TOOL_HANDLERS
+    return name in _TOOLS
 
 
-async def call_tool(name: str, arguments: Mapping[str, Any]) -> Any:
-    if name == "user.summary.fetch":
-        return await _call_user_summary(arguments)
-    if name == "user.last_training.fetch":
-        return await _call_user_last_training(arguments)
-    raise ToolError("InvalidParams", f"Unknown tool '{name}'")
-
-
-def _normalize_user_id(value: Any) -> int:
-    if isinstance(value, bool):
-        raise ToolError("InvalidParams", "user_id must be an integer")
+# ---------- dispatcher ----------
+async def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        user_id = int(value)
-    except (TypeError, ValueError):
-        raise ToolError("InvalidParams", "user_id must be an integer") from None
-    if user_id < 0:
-        raise ToolError("InvalidParams", "user_id must be non-negative")
-    return user_id
+        if name == "user.summary.fetch":
+            user_id = int(arguments.get("user_id"))
+            summary = await _read_user_summary(user_id)
+            return _ok_json(summary)
 
+        if name == "user.last_training.fetch":
+            user_id = int(arguments.get("user_id"))
+            oldest = arguments.get("oldest")
+            newest = arguments.get("newest")
+            items, rng = await _read_trainings(user_id, oldest, newest)
 
-def _coerce_user_id(arguments: Mapping[str, Any]) -> int:
-    if "user_id" in arguments:
-        return _normalize_user_id(arguments["user_id"])
-
-    stored = session_store.get_user_id()
-    if stored is None:
-        raise ToolError(
-            "InvalidParams",
-            "user_id is required; call session.set_user_id(user_id) first or pass user_id",
-        )
-    return _normalize_user_id(stored)
-
-
-def _parse_date(arguments: Mapping[str, Any], key: str) -> Optional[date]:
-    if key not in arguments:
-        return None
-    value = arguments[key]
-    if value is None or value == "":
-        return None
-    if isinstance(value, bool):
-        raise ToolError("InvalidParams", f"{key} must be a YYYY-MM-DD string")
-    if isinstance(value, date) and not isinstance(value, datetime):
-        return value
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, str):
-        try:
-            return date.fromisoformat(value)
-        except ValueError:
-            raise ToolError(
-                "InvalidParams", f"{key} must be in YYYY-MM-DD format"
-            ) from None
-    raise ToolError("InvalidParams", f"{key} must be a YYYY-MM-DD string")
-
-
-def _today() -> date:
-    return date.today()
-
-
-async def _call_user_summary(arguments: Mapping[str, Any]) -> str:
-    user_id = _coerce_user_id(arguments)
-    try:
-        raw_summary = await gw.get_user_summary(user_id)
-    except gw.GwUnavailable as exc:
-        raise ToolError("GwUnavailable", "gateway unavailable") from exc
-    except gw.GwBadResponse as exc:
-        data = {"status": exc.status_code} if exc.status_code is not None else None
-        raise ToolError("GwBadResponse", "gateway returned bad response", data) from exc
-
-    return _stringify_summary(raw_summary)
-
-
-def _stringify_summary(raw_summary: Any) -> str:
-    payload = raw_summary
-    if isinstance(raw_summary, Mapping) and raw_summary.get("ok") is True:
-        payload = raw_summary.get("user_summary", payload)
-
-    if isinstance(payload, Mapping):
-        for key in ("text", "summary", "description"):
-            if key in payload:
-                value = payload[key]
-                if isinstance(value, bytes):
-                    return value.decode("utf-8", errors="replace")
-                return str(value)
-        try:
-            return json.dumps(
-                payload, ensure_ascii=False, separators=(",", ":"), default=str
-            )
-        except TypeError:
-            return str(payload)
-
-    if isinstance(payload, bytes):
-        return payload.decode("utf-8", errors="replace")
-    if isinstance(payload, str):
-        return payload
-
-    try:
-        return json.dumps(
-            payload, ensure_ascii=False, separators=(",", ":"), default=str
-        )
-    except TypeError:
-        return str(payload)
-
-
-async def _call_user_last_training(arguments: Mapping[str, Any]) -> Dict[str, Any]:
-    user_id = _coerce_user_id(arguments)
-    newest = _parse_date(arguments, "newest")
-    oldest = _parse_date(arguments, "oldest")
-
-    if newest is None:
-        newest = _today()
-    if oldest is None:
-        oldest = newest - timedelta(days=_DEFAULT_RANGE_DAYS)
-
-    if oldest > newest:
-        raise ToolError("InvalidParams", "oldest date cannot be after newest date")
-
-    try:
-        trainings = await gw.get_trainings(
-            user_id=user_id, oldest=oldest, newest=newest
-        )
-    except gw.GwUnavailable as exc:
-        raise ToolError("GwUnavailable", "gateway unavailable") from exc
-    except gw.GwBadResponse as exc:
-        data = {"status": exc.status_code} if exc.status_code is not None else None
-        raise ToolError("GwBadResponse", "gateway returned bad response", data) from exc
-
-    filtered = [
-        training for training in trainings if not _is_future_training(training, newest)
-    ]
-    return {"items": filtered}
-
-
-def _is_future_training(training: Mapping[str, Any], newest: date) -> bool:
-    training_date = _extract_training_date(training)
-    return training_date is not None and training_date > newest
-
-
-def _extract_training_date(training: Mapping[str, Any]) -> Optional[date]:
-    if not isinstance(training, Mapping):
-        return None
-    candidates = (
-        training.get("date"),
-        training.get("start_date"),
-        training.get("start_at"),
-    )
-    for value in candidates:
-        if value is None:
-            continue
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, date) and not isinstance(value, datetime):
-            return value
-        if isinstance(value, datetime):
-            return value.date()
-        if isinstance(value, str):
-            try:
-                return date.fromisoformat(value[:10])
-            except ValueError:
+            last = None
+            if items:
+                # отфильтруем будущее и возьмём максимум по дате
+                newest_d = None
                 try:
-                    return datetime.fromisoformat(value).date()
-                except ValueError:
-                    continue
-    return None
+                    newest_d = dt.date.fromisoformat(rng["newest"])
+                except Exception:
+                    pass
+                items_sorted = sorted(items, key=lambda x: (x or {}).get("date") or "")
+                if newest_d:
+                    items_sorted = [x for x in items_sorted if (x.get("date") and dt.date.fromisoformat(x["date"]) <= newest_d)]
+                last = items_sorted[-1] if items_sorted else None
 
+            return _ok_json({"ok": True, "last": last, "count": len(items), "range": rng})
 
-__all__ = [
-    "ToolError",
-    "call_tool",
-    "get_tool_definitions",
-    "has_tool",
-]
+        if name == "plan.list":
+            aid = arguments.get("athlete_id", arguments.get("user_id"))
+            user_id = int(aid)
+            oldest = arguments.get("oldest")
+            newest = arguments.get("newest")
+            limit = arguments.get("limit")
+
+            events, rng = await _read_plan_events(user_id, oldest, newest)
+            if isinstance(limit, int) and limit > 0:
+                events = events[-limit:]
+
+            return _ok_json({"ok": True, "items": events, "count": len(events), "range": rng})
+
+    except httpx.HTTPStatusError as exc:
+        raise ToolError(424, f"upstream {exc.response.status_code}: {exc}")
+    except Exception as exc:
+        raise ToolError(424, f"tool '{name}' failed: {exc}")
+
+    raise ToolError(404, f"unknown tool '{name}'")
