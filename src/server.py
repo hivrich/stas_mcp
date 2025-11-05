@@ -6,20 +6,30 @@ from typing import Any, Dict, Tuple
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-# ВАЖНО: абсолютные импорты через пакет 'src'
+# абсолютные импорты из пакета src
 from src.mcp.tools_read import user_summary_fetch, user_last_training_fetch
 from src.mcp.tools_plan import (
     plan_list, plan_status, plan_update, plan_publish, plan_delete, plan_validate
 )
 
+APP_PROTOCOL = "2025-06-18"  # MCP spec revision we speak
+
 app = FastAPI(title="STAS MCP Server", version="2025.11.05")
+
+# ----------------- helpers -----------------
 
 def _rpc_ok(id_: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"jsonrpc": "2.0", "id": id_, "result": payload}
 
-def _content(json_payload: Dict[str, Any], text: str) -> Dict[str, Any]:
-    return {"content": [{"type": "json", "json": json_payload},
-                        {"type": "text", "text": text}]}
+def _content(text: str, structured: Dict[str, Any] | None = None, is_error: bool = False) -> Dict[str, Any]:
+    res = {
+        "content": [{"type": "text", "text": text}],
+        "isError": bool(is_error),
+    }
+    if structured is not None:
+        # MCP: structured data goes here (NOT as {type:"json"} in content)
+        res["structuredContent"] = structured
+    return res
 
 def _args_to_obj(arguments: Any) -> Tuple[Dict[str, Any], bool]:
     if arguments is None:
@@ -33,8 +43,7 @@ def _args_to_obj(arguments: Any) -> Tuple[Dict[str, Any], bool]:
             return {}, True
     return {}, False
 
-def _okify(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return payload if "ok" in payload else {"ok": True, **payload}
+# ----------------- registry -----------------
 
 TOOLS_REGISTRY = {
     "user.summary.fetch": user_summary_fetch,
@@ -50,7 +59,7 @@ TOOLS_REGISTRY = {
 TOOLS_SCHEMAS = {
     "user.summary.fetch": {
         "name": "user.summary.fetch",
-        "description": "Fetches user summary (linked account or explicit user_id).",
+        "description": "Fetch user summary (linked account or explicit user_id).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -63,7 +72,7 @@ TOOLS_SCHEMAS = {
     },
     "user.last_training.fetch": {
         "name": "user.last_training.fetch",
-        "description": "Returns recent trainings in a date window.",
+        "description": "Return recent trainings in a date window.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -99,16 +108,25 @@ TOOLS_SCHEMAS = {
     "plan.validate": {"name": "plan.validate", "description": "Validate plan consistency", "inputSchema": {"type": "object","properties": {},"required": []}},
 }
 
+# ----------------- health -----------------
+
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True, "service": "stas-mcp", "version": app.version}
+    return {"ok": True, "service": "stas-mcp", "version": app.version, "protocol": APP_PROTOCOL}
 
 @app.get("/sse")
 async def sse_stub():
     return JSONResponse({"ok": True, "sse": "noop"})
 
+# ----------------- MCP endpoint -----------------
+
 @app.post("/mcp")
 async def mcp(request: Request):
+    """
+    MCP over JSON-RPC 2.0.
+    MUST support: initialize, tools/list, tools/call.
+    MUST: never break transport; errors go via result.isError/structuredContent per spec.
+    """
     body = await request.json()
     id_ = body.get("id")
     method = body.get("method")
@@ -116,7 +134,12 @@ async def mcp(request: Request):
 
     try:
         if method == "initialize":
-            return _rpc_ok(id_, {"capabilities": {"tools": True}, "meta": {"server": "stas-mcp"}})
+            # spec: declare capabilities.tools + (optionally) echo protocolVersion
+            return _rpc_ok(id_, {
+                "protocolVersion": APP_PROTOCOL,
+                "capabilities": {"tools": {"listChanged": False}},
+                "meta": {"server": "stas-mcp"}
+            })
 
         if method == "tools/list":
             tools = [TOOLS_SCHEMAS[name] for name in TOOLS_REGISTRY.keys()]
@@ -129,25 +152,37 @@ async def mcp(request: Request):
 
             handler = TOOLS_REGISTRY.get(name)
             if not handler:
-                payload = {"ok": False, "error": {"code": "tool_not_found", "message": f"Unknown tool: {name}"}}
-                return _rpc_ok(id_, _content(payload, f"{name}: error"))
+                return _rpc_ok(id_, _content(
+                    text=f"{name}: unknown tool",
+                    structured={"code": "tool_not_found", "name": name},
+                    is_error=True,
+                ))
 
             try:
+                # handlers return (json_payload: dict, text: str)
                 json_payload, text = await handler(args)
-                json_payload = _okify(json_payload)
-                return _rpc_ok(id_, _content(json_payload, text or f"{name}: ok"))
+                return _rpc_ok(id_, _content(
+                    text=text or f"{name}: ok",
+                    structured=json_payload,
+                    is_error=bool(json_payload.get("ok") is False)
+                ))
             except Exception as e:
-                err = {
-                    "ok": False,
-                    "error": {
-                        "code": "internal_error",
-                        "message": str(e)[:500],
-                        "args_were_string": was_string,
-                        "tool": name,
-                    },
-                }
-                return _rpc_ok(id_, _content(err, f"{name}: error"))
+                return _rpc_ok(id_, _content(
+                    text=f"{name}: error",
+                    structured={"code": "internal_error", "message": str(e)[:500], "args_were_string": was_string, "tool": name},
+                    is_error=True
+                ))
 
-        return _rpc_ok(id_, _content({"ok": False, "error": {"code": "method_not_supported", "method": method}}, "unsupported"))
+        # unknown method → soft error (still valid JSON-RPC result)
+        return _rpc_ok(id_, _content(
+            text="unsupported",
+            structured={"code": "method_not_supported", "method": method},
+            is_error=True
+        ))
     except Exception as e:
-        return _rpc_ok(id_, _content({"ok": False, "error": {"code": "fatal", "message": str(e)[:500]}}, "fatal"))
+        # last resort: never 4xx/5xx to client
+        return _rpc_ok(id_, _content(
+            text="fatal",
+            structured={"code": "fatal", "message": str(e)[:500]},
+            is_error=True
+        ))
