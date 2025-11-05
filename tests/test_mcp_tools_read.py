@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 from typing import Any, Dict, List
 
 import pytest
@@ -19,12 +20,20 @@ async def _post_rpc(client: AsyncClient, payload: Dict[str, Any]) -> Dict[str, A
 
 
 @pytest.mark.anyio
-async def test_user_summary_fetch_ok(monkeypatch: pytest.MonkeyPatch) -> None:
-    summary = {"ok": True}
-
+@pytest.mark.parametrize(
+    ("gw_response", "expected"),
+    [
+        ({"ok": True, "user_summary": {"text": "Alpha text"}}, "Alpha text"),
+        ({"ok": True, "user_summary": {"summary": "Beta summary"}}, "Beta summary"),
+        ({"ok": True, "user_summary": {"description": "Gamma description"}}, "Gamma description"),
+    ],
+)
+async def test_user_summary_fetch_plain_text(
+    monkeypatch: pytest.MonkeyPatch, gw_response: Dict[str, Any], expected: str
+) -> None:
     async def fake_get_user_summary(user_id: int) -> Dict[str, Any]:
         assert user_id == 123
-        return summary
+        return gw_response
 
     monkeypatch.setattr(gw, "get_user_summary", fake_get_user_summary)
 
@@ -44,7 +53,43 @@ async def test_user_summary_fetch_ok(monkeypatch: pytest.MonkeyPatch) -> None:
                 },
             )
 
-    assert data["result"] == summary
+    result = data["result"]
+    assert isinstance(result, str)
+    assert result == expected
+
+
+@pytest.mark.anyio
+async def test_user_summary_fetch_plain_text_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {"details": ["Item"], "score": 42}
+
+    async def fake_get_user_summary(user_id: int) -> Dict[str, Any]:
+        assert user_id == 321
+        return {"ok": True, "user_summary": payload}
+
+    monkeypatch.setattr(gw, "get_user_summary", fake_get_user_summary)
+
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            data = await _post_rpc(
+                client,
+                {
+                    "jsonrpc": "2.0",
+                    "id": "summary-fallback",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "user.summary.fetch",
+                        "arguments": {"user_id": 321},
+                    },
+                },
+            )
+
+    result = data["result"]
+    assert isinstance(result, str)
+    assert result == json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    assert result
 
 
 @pytest.mark.anyio
