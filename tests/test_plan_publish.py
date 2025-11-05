@@ -62,9 +62,9 @@ async def test_plan_publish_confirm_true_uses_real_write(
     data = response.json()
     assert data["status"] == "published"
     assert data["external_id"] == "week-42"
-    assert data["external_id_normalized"] == "plan:week-42"
+    assert data["external_id_normalized"] == "plan:2025-01-01:week-42"
     assert data["count"] == 2
     assert calls, "gateway must be invoked"
     last_call = calls[-1]
     assert last_call["params"]["dry_run"] == "false"
-    assert last_call["json"]["external_id"] == "plan:week-42"
+    assert last_call["json"]["external_id"] == "plan:2025-01-01:week-42"

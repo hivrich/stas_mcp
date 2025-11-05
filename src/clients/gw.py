@@ -39,8 +39,8 @@ class GwBadResponse(GwError):
 
 
 _REQUEST_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
-_RETRY_ATTEMPTS = 2
-_RETRY_DELAY = 0.1
+_RETRY_ATTEMPTS = 3
+_RETRY_BACKOFF = (0.2, 0.5, 1.0)
 
 
 def make_bearer_for_user(user_id: int) -> str:
@@ -142,23 +142,60 @@ async def plan_update(
 
 async def plan_status(*, user_id: int, external_id: str) -> Dict[str, Any]:
     normalized = _normalize_plan_external_id(external_id)
+    params = {"category": "WORKOUT", "external_id": normalized}
+    need_window_lookup = False
+
+    try:
+        data = await _request_json(
+            "GET",
+            "/icu/events",
+            user_id=user_id,
+            params=params,
+        )
+    except GwBadResponse as exc:
+        if exc.status_code == 404:
+            return {"status": "missing"}
+        if exc.status_code and exc.status_code < 500:
+            need_window_lookup = True
+        else:
+            raise
+    else:
+        events = _ensure_list_of_dicts(data, "plan events")
+        for event in events:
+            if str(event.get("external_id")) != normalized:
+                continue
+            result: Dict[str, Any] = {"status": "published"}
+            if etag := _hash_event_payload(event):
+                result["etag"] = etag
+            if updated := _event_updated_at(event):
+                result["updated_at"] = updated
+            return result
+        if not need_window_lookup:
+            return {"status": "missing"}
+
     window = _status_window(normalized)
     params = {
         "oldest": window["oldest"],
         "newest": window["newest"],
         "category": "WORKOUT",
     }
-    data = await _request_json(
-        "GET",
-        "/icu/events",
-        user_id=user_id,
-        params=params,
-    )
+    try:
+        data = await _request_json(
+            "GET",
+            "/icu/events",
+            user_id=user_id,
+            params=params,
+        )
+    except GwBadResponse as exc:
+        if exc.status_code == 404:
+            return {"status": "missing"}
+        raise
+
     events = _ensure_list_of_dicts(data, "plan events")
     for event in events:
         if str(event.get("external_id")) != normalized:
             continue
-        result: Dict[str, Any] = {"status": "published"}
+        result = {"status": "published"}
         if etag := _hash_event_payload(event):
             result["etag"] = etag
         if updated := _event_updated_at(event):
@@ -177,10 +214,11 @@ async def plan_list(
     cursor: str | None = None,
 ) -> Dict[str, Any]:
     today = date.today()
-    oldest = today - timedelta(days=30)
+    oldest = today - timedelta(days=90)
+    newest = today + timedelta(days=7)
     params = {
         "oldest": (date_from or oldest.isoformat()),
-        "newest": (date_to or today.isoformat()),
+        "newest": (date_to or newest.isoformat()),
         "category": "WORKOUT",
     }
 
@@ -252,11 +290,14 @@ async def _request_json(
             last_error = exc
             if attempt + 1 >= _RETRY_ATTEMPTS:
                 raise GwUnavailable("gateway is unavailable") from exc
-            await asyncio.sleep(_RETRY_DELAY)
+            await asyncio.sleep(_retry_delay_for_attempt(attempt))
             continue
 
         if response.status_code >= 500:
-            raise GwUnavailable("gateway returned a server error")
+            if attempt + 1 >= _RETRY_ATTEMPTS:
+                raise GwUnavailable("gateway returned a server error")
+            await asyncio.sleep(_retry_delay_for_attempt(attempt))
+            continue
         if response.status_code >= 400:
             error_payload: Any | None = None
             try:
@@ -278,6 +319,11 @@ async def _request_json(
             raise GwBadResponse("invalid JSON from gateway") from exc
 
     raise GwUnavailable("gateway request failed") from last_error
+
+
+def _retry_delay_for_attempt(attempt: int) -> float:
+    index = min(attempt, len(_RETRY_BACKOFF) - 1)
+    return _RETRY_BACKOFF[index]
 
 
 def _ensure_list_of_dicts(data: Any, name: str) -> List[Dict[str, Any]]:
@@ -334,7 +380,7 @@ def _status_window(external_id: str) -> Dict[str, str]:
         else:
             iso = day.isoformat()
             return {"oldest": iso, "newest": iso}
-    oldest = (today - timedelta(days=7)).isoformat()
+    oldest = (today - timedelta(days=90)).isoformat()
     newest = (today + timedelta(days=7)).isoformat()
     return {"oldest": oldest, "newest": newest}
 
