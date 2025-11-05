@@ -3,6 +3,7 @@
 # Tools: user.summary.fetch, user.last_training.fetch, plan.list
 
 from __future__ import annotations
+
 import asyncio
 import base64
 import datetime as dt
@@ -15,6 +16,9 @@ MANIFEST_SCHEMA_URI = "http://json-schema.org/draft-07/schema#"
 BRIDGE_BASE = "https://intervals.stas.run/gw"
 
 
+# -----------------------------------------------------------------------------
+# Errors (kept for compatibility; we do NOT raise them out of tools)
+# -----------------------------------------------------------------------------
 class ToolError(Exception):
     def __init__(self, code: int, message: str, data: Any | None = None):
         super().__init__(message)
@@ -23,9 +27,41 @@ class ToolError(Exception):
         self.data = data
 
 
-def _ok_json(obj: Any) -> Dict[str, Any]:
-    return {"content": [{"type": "json", "json": obj}]}
+# -----------------------------------------------------------------------------
+# Envelope helpers: ALWAYS return json + short text for UI
+# -----------------------------------------------------------------------------
 
+def _summarize_for_text(obj: Any) -> str:
+    try:
+        if isinstance(obj, dict) and obj.get("ok") is False:
+            e = obj.get("error", {}) or {}
+            return f"error {e.get('code','')}: {e.get('message','unknown')}"
+        if isinstance(obj, dict) and {"count", "range"} <= set(obj.keys()):
+            rng = obj.get("range") or {}
+            return (
+                f"ok: {obj.get('count', 0)} items, "
+                f"window {rng.get('oldest','?')}..{rng.get('newest','?')}"
+            )
+        if isinstance(obj, dict) and "info" in obj:
+            return "ok: user summary loaded"
+        return "ok"
+    except Exception:
+        return "ok"
+
+
+def _ok_json(obj: Any) -> Dict[str, Any]:
+    """Wrap payload for MCP tool response: json + short text."""
+    return {
+        "content": [
+            {"type": "json", "json": obj},
+            {"type": "text", "text": _summarize_for_text(obj)},
+        ]
+    }
+
+
+# -----------------------------------------------------------------------------
+# Utility
+# -----------------------------------------------------------------------------
 
 def _mk_token(user_id: int) -> str:
     payload = {"uid": int(user_id)}
@@ -42,6 +78,7 @@ async def _retry(fn, attempts: int = 2, delay: float = 0.3):
             last_exc = exc
             if i + 1 < attempts:
                 await asyncio.sleep(delay)
+    # Exhausted
     raise last_exc  # type: ignore[misc]
 
 
@@ -51,41 +88,69 @@ def _today_utc_date() -> dt.date:
 
 def _to_date(value: Any) -> Optional[dt.date]:
     """
-    Принимает:
+    Accepts forms like:
       'YYYY-MM-DD'
-      'YYYY-MM-DDTHH:MM:SS' / '...Z' / '...+00:00'
-    Возвращает date или None.
+      'YYYY-MM-DDTHH:MM:SS[.fff][Z|+00:00]'
+      common loose variants ('YYYY-MM-DD HH:MM:SS')
+    Returns date or None.
     """
     if not value:
         return None
+    if isinstance(value, dt.date) and not isinstance(value, dt.datetime):
+        return value
+    if isinstance(value, dt.datetime):
+        return value.date()
+
     s = str(value).strip()
-    # самый дешёвый вариант — взять первые 10 символов, если там YYYY-MM-DD
+
+    # Quick path: YYYY-MM-DD at the start
     if len(s) >= 10 and s[4] == "-" and s[7] == "-":
         try:
             return dt.date.fromisoformat(s[:10])
         except Exception:
             pass
-    # пробуем полноценный ISO 8601
+
+    # ISO with offset / Z
     try:
         s2 = s.replace("Z", "+00:00")
         return dt.datetime.fromisoformat(s2).date()
     except Exception:
-        return None
+        pass
+
+    # Fallback common formats
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+    ):
+        try:
+            return dt.datetime.strptime(s, fmt).date()
+        except Exception:
+            continue
+
+    return None
 
 
 def _item_date(item: dict) -> Optional[dt.date]:
-    """
-    Достаём дату из возможных ключей тренировок Intervals:
-    'date' | 'start_date_local' | 'start_date' | 'start_time'
-    """
-    for k in ("date", "start_date_local", "start_date", "start_time"):
+    """Try multiple keys typical for Intervals data to find a date."""
+    for k in (
+        "date",
+        "start_date_local",
+        "start_date",
+        "start_time",
+        "when",
+        "activity_date",
+    ):
         d = _to_date((item or {}).get(k))
         if d:
             return d
     return None
 
 
-async def _gw_get_json(path: str, token: str, params: Dict[str, Any] | None = None, timeout: float = 25.0) -> Any:
+async def _gw_get_json(
+    path: str, token: str, params: Dict[str, Any] | None = None, timeout: float = 25.0
+) -> Any:
     async with httpx.AsyncClient(base_url=BRIDGE_BASE, timeout=timeout) as cli:
         r = await cli.get(
             path,
@@ -96,13 +161,17 @@ async def _gw_get_json(path: str, token: str, params: Dict[str, Any] | None = No
         return r.json()
 
 
+# -----------------------------------------------------------------------------
+# Upstream readers
+# -----------------------------------------------------------------------------
+
 async def _read_user_summary(user_id: int) -> Any:
     token = _mk_token(user_id)
 
     async def once():
         return await _gw_get_json("/api/db/user_summary", token)
 
-    # спецификация: один скрытый повтор; используем второй ответ, если он успешен
+    # Spec: do one hidden retry (server issues can return a short first reply)
     first = await _retry(once, attempts=1)
     try:
         second = await _retry(once, attempts=1)
@@ -132,7 +201,7 @@ async def _read_plan_events(
 ) -> Tuple[List[dict], Dict[str, str]]:
     token = _mk_token(user_id)
 
-    # по умолчанию: текущая неделя (пн..вс) в UTC
+    # Default window: current week (Mon..Sun) in UTC
     if not newest:
         today = _today_utc_date()
         week_start = today - dt.timedelta(days=today.weekday())
@@ -143,12 +212,11 @@ async def _read_plan_events(
         d_new = dt.date.fromisoformat(newest)
         oldest = (d_new - dt.timedelta(days=6)).isoformat()
 
-    # План = события календаря WORKOUT (или без category с фильтрацией — но здесь используем WORKOUT)
+    # Calendar events (WORKOUT/PLAN). Upstream filter by WORKOUT, we additionally keep PLAN/external_id prefix
     params = {"oldest": oldest, "newest": newest, "category": "WORKOUT"}
     raw = await _retry(lambda: _gw_get_json("/icu/events", token, params=params))
     events = raw if isinstance(raw, list) else []
 
-    # Оставляем только плановые: category∈{WORKOUT,PLAN} или external_id startswith 'plan:'
     filtered: List[dict] = []
     for e in events:
         cat = (e or {}).get("category")
@@ -156,9 +224,15 @@ async def _read_plan_events(
         if cat in ("WORKOUT", "PLAN") or (isinstance(ext, str) and ext.startswith("plan:")):
             filtered.append(e)
 
-    filtered.sort(key=lambda ev: ((_item_date(ev) or dt.date.min), (ev or {}).get("start_date_local") or ""))
+    filtered.sort(
+        key=lambda ev: ((_item_date(ev) or dt.date.min), (ev or {}).get("start_date_local") or "")
+    )
     return filtered, {"oldest": oldest or "", "newest": newest or ""}
 
+
+# -----------------------------------------------------------------------------
+# Tool definitions
+# -----------------------------------------------------------------------------
 
 _TOOLS: Dict[str, Dict[str, Any]] = {
     "user.summary.fetch": {
@@ -216,8 +290,13 @@ def has_tool(name: str) -> bool:
     return name in _TOOLS
 
 
+# -----------------------------------------------------------------------------
+# Tool dispatcher — NEVER raise; always return ok:false on failure
+# -----------------------------------------------------------------------------
+
 async def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     import json as _json
+
     def _err(code: int, message: str, data: Any | None = None) -> Dict[str, Any]:
         payload = {"ok": False, "error": {"code": int(code), "message": str(message)}}
         if data is not None:
@@ -225,10 +304,11 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return _ok_json(payload)
 
     try:
+        # Chat runtimes often pass args as JSON string — accept both
         if isinstance(arguments, str):
             try:
                 arguments = _json.loads(arguments)
-            except Exception as _e:
+            except Exception as _e:  # noqa: BLE001
                 return _err(424, f"invalid arguments JSON: {_e}")
         if not isinstance(arguments, dict):
             return _err(424, f"invalid arguments type: {type(arguments)} (expected object)")
@@ -269,34 +349,8 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
 
         return _err(404, f"unknown tool '{name}'")
 
-    except httpx.HTTPStatusError as exc:
+    except httpx.HTTPStatusError as exc:  # upstream HTTP error -> soft error
         st = int(getattr(exc, "response", None).status_code or 424)
         return _err(424, f"upstream {st}: {exc}")
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover — ANY other failure -> soft error
         return _err(424, f"tool '{name}' failed: {exc}")
-
-
-# --- helpers: envelope with json + short text --------------------------------
-def _summarize_for_text(obj: Any) -> str:
-    try:
-        if isinstance(obj, dict) and obj.get("ok") is False:
-            e = obj.get("error", {})
-            return f"error {e.get('code', '')}: {e.get('message', 'unknown')}"
-        if isinstance(obj, dict) and {"count", "range"} <= set(obj.keys()):
-            rng = obj.get("range") or {}
-            return f"ok: {obj.get('count', 0)} items, window {rng.get('oldest','?')}..{rng.get('newest','?')}"
-        if isinstance(obj, dict) and "info" in obj:
-            return "ok: user summary loaded"
-        return "ok"
-    except Exception:
-        return "ok"
-
-def _ok_json(obj: Any) -> Dict[str, Any]:
-    # всегда два контента: json + text (для UI, который показывает только text)
-    return {
-        "content": [
-            {"type": "json", "json": obj},
-            {"type": "text", "text": _summarize_for_text(obj)},
-        ]
-    }
-
