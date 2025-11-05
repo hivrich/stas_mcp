@@ -217,7 +217,18 @@ def has_tool(name: str) -> bool:
 
 
 async def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    import json as _json  # локальный импорт, чтобы не конфликтовать с глобальным
     try:
+        # ← НОВОЕ: приводим строковые args к объекту
+        if isinstance(arguments, str):
+            try:
+                arguments = _json.loads(arguments)
+            except Exception as _e:
+                raise ToolError(424, f"invalid arguments (expected JSON object, got str): {type(arguments)}: {_e}")
+
+        if not isinstance(arguments, dict):
+            raise ToolError(424, f"invalid arguments type: {type(arguments)} (expected object)")
+
         if name == "user.summary.fetch":
             user_id = int(arguments.get("user_id"))
             summary = await _read_user_summary(user_id)
@@ -258,7 +269,10 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     except httpx.HTTPStatusError as exc:
         raise ToolError(424, f"upstream {exc.response.status_code}: {exc}")
+    except ToolError:
+        raise
     except Exception as exc:
         raise ToolError(424, f"tool '{name}' failed: {exc}")
 
     raise ToolError(404, f"unknown tool '{name}'")
+
