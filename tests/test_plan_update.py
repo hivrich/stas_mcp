@@ -14,20 +14,27 @@ async def test_plan_update_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(gw, "plan_update", fake_plan_update)
 
+    patch = {"days": [{"date": "2025-03-02", "title": "changed"}]}
+
     result = await tools_plan_write_ext.call_tool(
         "plan.update",
         {
-            "external_id": "plan:2024-w10",
-            "patch": {"days": ["changed"]},
+            "external_id": "week-10",
+            "patch": patch,
         },
         user_id=42,
     )
 
-    assert result == {"would_change": True, "diff": {"days": ["changed"]}}
+    assert result == {
+        "external_id": "week-10",
+        "external_id_normalized": "plan:2025-03-02:week-10",
+        "would_change": True,
+        "diff": {"days": ["changed"]},
+    }
     assert captured == {
         "user_id": 42,
-        "external_id": "plan:2024-w10",
-        "patch": {"days": ["changed"]},
+        "external_id": "plan:2025-03-02:week-10",
+        "patch": patch,
         "dry_run": True,
         "if_match": None,
     }
@@ -53,7 +60,12 @@ async def test_plan_update_confirm(monkeypatch: pytest.MonkeyPatch) -> None:
         user_id=77,
     )
 
-    assert result == {"updated": True, "etag": "etag-2"}
+    assert result == {
+        "external_id": "plan:2024-w11",
+        "external_id_normalized": "plan:2024-w11",
+        "updated": True,
+        "etag": "etag-2",
+    }
 
 
 @pytest.mark.anyio
@@ -74,7 +86,12 @@ async def test_plan_update_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
         user_id=88,
     )
 
-    assert result == {"updated": False, "etag": None}
+    assert result == {
+        "external_id": "plan:2024-w12",
+        "external_id_normalized": "plan:2024-w12",
+        "updated": False,
+        "etag": None,
+    }
 
 
 @pytest.mark.anyio

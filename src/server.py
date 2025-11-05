@@ -24,6 +24,7 @@ from .mcp import resources_user as mcp_resources_user
 from .mcp import tools_plan_write_ext, tools_read as mcp_tools_read
 from .mcp import tools_session as mcp_tools_session
 from .routes.read_user import router as read_user_router
+from .utils.plan_external_id import normalize_plan_external_id
 
 try:
     from .config import settings
@@ -882,14 +883,13 @@ async def plan_publish(
         return {"ok": False, "error": "invalid_payload"}
 
     draft = _draft_from_payload(payload)
-    raw_external_id = (
-        str(payload.get("external_id") or draft.get("external_id") or "").strip()
-        or "plan:auto"
+    draft_days = draft.get("days") if isinstance(draft.get("days"), list) else None
+    raw_external_id_input = str(
+        payload.get("external_id") or draft.get("external_id") or ""
     )
-    normalized_external_id = (
-        raw_external_id
-        if raw_external_id.startswith("plan:")
-        else f"plan:{raw_external_id}"
+    raw_external_id, normalized_external_id = normalize_plan_external_id(
+        raw_external_id_input,
+        days=draft_days,
     )
     events = _build_events(draft, normalized_external_id)
 

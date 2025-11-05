@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Mapping, Optional
 
 from src.clients import gw
+from src.utils.plan_external_id import normalize_plan_external_id
 
 logger = logging.getLogger(__name__)
 
@@ -173,19 +174,28 @@ def _coerce_if_match(arguments: Mapping[str, Any]) -> Optional[str]:
 async def _call_plan_update(
     arguments: Mapping[str, Any], user_id: int
 ) -> Dict[str, Any]:
-    external_id = _coerce_external_id(arguments)
+    external_id_raw = _coerce_external_id(arguments)
     patch = _coerce_patch(arguments)
     confirm = _coerce_confirm(arguments)
     if_match = _coerce_if_match(arguments)
 
+    patch_days = patch.get("days") if isinstance(patch.get("days"), list) else None
+    external_id, external_id_normalized = normalize_plan_external_id(
+        external_id_raw, days=patch_days
+    )
+
     logger.info(
         "plan.update request",
-        extra={"external_id": external_id, "confirm": confirm},
+        extra={
+            "external_id": external_id,
+            "external_id_normalized": external_id_normalized,
+            "confirm": confirm,
+        },
     )
     try:
         response = await gw.plan_update(
             user_id=user_id,
-            external_id=external_id,
+            external_id=external_id_normalized,
             patch=patch,
             dry_run=not confirm,
             if_match=if_match,
@@ -228,10 +238,13 @@ async def _call_plan_update(
             "plan.update applied",
             extra={
                 "external_id": external_id,
+                "external_id_normalized": external_id_normalized,
                 "updated": bool(response.get("updated")),
             },
         )
         return {
+            "external_id": external_id,
+            "external_id_normalized": external_id_normalized,
             "updated": bool(response.get("updated", False)),
             "etag": response.get("etag"),
         }
@@ -240,10 +253,13 @@ async def _call_plan_update(
         "plan.update dry-run",
         extra={
             "external_id": external_id,
+            "external_id_normalized": external_id_normalized,
             "would_change": bool(response.get("would_change")),
         },
     )
     return {
+        "external_id": external_id,
+        "external_id_normalized": external_id_normalized,
         "would_change": bool(response.get("would_change", False)),
         "diff": response.get("diff", {}),
     }
