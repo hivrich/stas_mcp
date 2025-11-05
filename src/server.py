@@ -359,17 +359,17 @@ async def mcp_rpc(request: Request) -> JSONResponse:
     if params and not isinstance(params, dict):
         return rpc_err(rpc_id, -32602, "Invalid params: expected object")
 
-    if method == "initialize":
-    proto = params.get("protocolVersion") or MCP_PROTOCOL_VERSION
-    result = {
-        "protocolVersion": proto,
-        "capabilities": {
-            "tools": {"list": True, "call": True, "listChanged": True},
-            "resources": {"list": True, "read": True},
-        },
-        "serverInfo": {"name": "stas-mcp-bridge", "version": "1.0.0"},
-    }
-    return rpc_ok(rpc_id, result)
+        if method == "initialize":
+        proto = params.get("protocolVersion") or MCP_PROTOCOL_VERSION
+        result = {
+            "protocolVersion": proto,
+            "capabilities": {
+                "tools": {"list": True, "call": True, "listChanged": True},
+                "resources": {"list": True, "read": True},
+            },
+            "serverInfo": {"name": "stas-mcp-bridge", "version": "1.0.0"},
+        }
+        return rpc_ok(rpc_id, result)
 
 
     if method == "tools/list":
