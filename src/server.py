@@ -6,7 +6,7 @@ from typing import Any, Dict, Tuple, List
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-# Важно: абсолютные импорты под существующую структуру
+# абсолютные импорты под текущую структуру
 from src.mcp.tools_read import user_summary_fetch, user_last_training_fetch
 from src.mcp.tools_plan import (
     plan_list, plan_status, plan_update, plan_publish, plan_delete, plan_validate
@@ -20,7 +20,7 @@ def _rpc_ok(id_: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"jsonrpc": "2.0", "id": id_, "result": payload}
 
 def _content(json_payload: Dict[str, Any], text: str) -> Dict[str, Any]:
-    # Классический формат MCP: весь структурный ответ — через type:"json" в content
+    # Надёжный формат для ChatGPT MCP: контент = [{type:"json"}, {type:"text"}]
     return {
         "content": [
             {"type": "json", "json": json_payload},
@@ -56,15 +56,18 @@ TOOLS_REGISTRY = {
     "plan.validate": plan_validate,
 }
 
+# ВАЖНО: MCP ждёт **input_schema** (snake_case), а не inputSchema
+JSON_SCHEMA_HDR = {"$schema": "https://json-schema.org/draft-07/schema#", "type": "object"}
+
 TOOLS_SCHEMAS: List[Dict[str, Any]] = [
     {
         "name": "user.summary.fetch",
         "description": "Fetch user summary (linked account or explicit user_id).",
-        "inputSchema": {
-            "type": "object",
+        "input_schema": {
+            **JSON_SCHEMA_HDR,
             "properties": {
-                "user_id": {"type": "integer"},
-                "connection_id": {"type": "string"},
+                "user_id": {"type": "integer", "description": "Explicit user id (optional)."},
+                "connection_id": {"type": "string", "description": "Chat connection id (optional)."},
             },
             "required": [],
             "additionalProperties": False,
@@ -73,8 +76,8 @@ TOOLS_SCHEMAS: List[Dict[str, Any]] = [
     {
         "name": "user.last_training.fetch",
         "description": "Return recent trainings in a date window.",
-        "inputSchema": {
-            "type": "object",
+        "input_schema": {
+            **JSON_SCHEMA_HDR,
             "properties": {
                 "user_id": {"type": "integer"},
                 "oldest": {"type": "string", "description": "YYYY-MM-DD"},
@@ -88,25 +91,25 @@ TOOLS_SCHEMAS: List[Dict[str, Any]] = [
     {
         "name": "plan.list",
         "description": "List workout plan events for a given window.",
-        "inputSchema": {
-            "type": "object",
+        "input_schema": {
+            **JSON_SCHEMA_HDR,
             "properties": {
-                "oldest": {"type": "string"},
-                "newest": {"type": "string"},
+                "oldest": {"type": "string", "description": "YYYY-MM-DD"},
+                "newest": {"type": "string", "description": "YYYY-MM-DD"},
                 "category": {"type": "string", "enum": ["WORKOUT", "RECOVERY", "OTHER"]},
                 "user_id": {"type": "integer"},
                 "connection_id": {"type": "string"},
-                "limit": {"type": "integer"}
+                "limit": {"type": "integer", "minimum": 1},
             },
             "required": [],
             "additionalProperties": False,
         },
     },
-    {"name":"plan.status","description":"Get current plan status","inputSchema":{"type":"object","properties":{},"required":[]}},
-    {"name":"plan.update","description":"Update plan entities","inputSchema":{"type":"object","properties":{"patch":{"type":"object"}},"required":["patch"]}},
-    {"name":"plan.publish","description":"Publish pending changes","inputSchema":{"type":"object","properties":{"note":{"type":"string"}},"required":[]}},
-    {"name":"plan.delete","description":"Delete a plan item","inputSchema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}},
-    {"name":"plan.validate","description":"Validate plan consistency","inputSchema":{"type":"object","properties":{},"required":[]}},
+    {"name":"plan.status","description":"Get current plan status","input_schema":{**JSON_SCHEMA_HDR,"properties":{},"required":[],"additionalProperties":False}},
+    {"name":"plan.update","description":"Update plan entities","input_schema":{**JSON_SCHEMA_HDR,"properties":{"patch":{"type":"object"}},"required":["patch"],"additionalProperties":False}},
+    {"name":"plan.publish","description":"Publish pending changes","input_schema":{**JSON_SCHEMA_HDR,"properties":{"note":{"type":"string"}},"required":[],"additionalProperties":False}},
+    {"name":"plan.delete","description":"Delete a plan item","input_schema":{**JSON_SCHEMA_HDR,"properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":False}},
+    {"name":"plan.validate","description":"Validate plan consistency","input_schema":{**JSON_SCHEMA_HDR,"properties":{},"required":[],"additionalProperties":False}},
 ]
 
 # ---------------- health ----------------
@@ -124,11 +127,11 @@ async def sse_stub():
 @app.post("/mcp")
 async def mcp(request: Request):
     """
-    Поддерживаем три метода:
+    Поддерживаем:
       - initialize
       - tools/list
       - tools/call
-    Никогда не роняем транспорт: любые исключения → успешный JSON-RPC с content=[{json},{text}]
+    Никогда не роняем транспорт: исключения → успешный JSON-RPC с content=[{json},{text}]
     """
     body = await request.json()
     id_ = body.get("id")
@@ -137,7 +140,7 @@ async def mcp(request: Request):
 
     try:
         if method == "initialize":
-            # Минимально достаточный ответ для ChatGPT-коннектора
+            # Минимум, который нужен ChatGPT для «Build actions…»
             return _rpc_ok(id_, {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {"listChanged": False}},
@@ -169,7 +172,7 @@ async def mcp(request: Request):
                     f"{name}: error"
                 ))
 
-        # Неподдерживаемое — мягко и валидно
+        # Неподдерживаемый метод — мягко
         return _rpc_ok(id_, _content({"ok": False, "error": {"code": "method_not_supported", "method": method}}, "unsupported"))
     except Exception as e:
         # Последний заслон от 4xx/5xx
