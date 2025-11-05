@@ -359,7 +359,7 @@ async def mcp_rpc(request: Request) -> JSONResponse:
     if params and not isinstance(params, dict):
         return rpc_err(rpc_id, -32602, "Invalid params: expected object")
 
-        if method == "initialize":
+    if method == "initialize":
         proto = params.get("protocolVersion") or MCP_PROTOCOL_VERSION
         result = {
             "protocolVersion": proto,
