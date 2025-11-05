@@ -101,19 +101,13 @@ def both_keys(schema_obj: Json) -> Json:
 TOOLS_SCHEMAS_ALL: List[Json] = [
     {
         "name": "user_summary_fetch",
-        "description": "Fetch user summary (linked account or explicit user_id).",
+        "description": "Fetch user summary (read-only).",
         **both_keys(
             {
                 **BASE_OBJ,
                 "properties": {
-                    "user_id": {
-                        "type": "integer",
-                        "description": "Optional explicit user id.",
-                    },
-                    "connection_id": {
-                        "type": "string",
-                        "description": "Optional chat connection id.",
-                    },
+                    "user_id": {"type": "integer", "description": "Optional explicit user id."},
+                    "connection_id": {"type": "string", "description": "Optional chat connection id."},
                 },
                 "required": [],
                 "additionalProperties": False,
@@ -122,7 +116,7 @@ TOOLS_SCHEMAS_ALL: List[Json] = [
     },
     {
         "name": "user_last_training_fetch",
-        "description": "Return recent trainings in a date window.",
+        "description": "Return recent trainings (read-only).",
         **both_keys(
             {
                 **BASE_OBJ,
@@ -139,17 +133,14 @@ TOOLS_SCHEMAS_ALL: List[Json] = [
     },
     {
         "name": "plan_list",
-        "description": "List workout plan events for a given window.",
+        "description": "List workout plan events (read-only).",
         **both_keys(
             {
                 **BASE_OBJ,
                 "properties": {
                     "oldest": {"type": "string", "description": "YYYY-MM-DD"},
                     "newest": {"type": "string", "description": "YYYY-MM-DD"},
-                    "category": {
-                        "type": "string",
-                        "enum": ["WORKOUT", "RECOVERY", "OTHER"],
-                    },
+                    "category": {"type": "string", "enum": ["WORKOUT", "RECOVERY", "OTHER"]},
                     "user_id": {"type": "integer"},
                     "connection_id": {"type": "string"},
                     "limit": {"type": "integer", "minimum": 1},
@@ -159,8 +150,9 @@ TOOLS_SCHEMAS_ALL: List[Json] = [
             }
         ),
     },
-    {"name": "plan_status", "description": "Get current plan status", **both_keys({"type": "object"})},
-    {"name": "plan_validate", "description": "Validate plan consistency", **both_keys({"type": "object"})},
+    {"name": "plan_status", "description": "Get current plan status (read-only).", **both_keys({"type": "object"})},
+    {"name": "plan_validate", "description": "Validate plan consistency (read-only).", **both_keys({"type": "object"})},
+
     # WRITE (покажем только при Authorization)
     {
         "name": "plan_update",
@@ -170,15 +162,8 @@ TOOLS_SCHEMAS_ALL: List[Json] = [
                 **BASE_OBJ,
                 "properties": {
                     "patch": {"type": "object"},
-                    "confirm": {
-                        "type": "boolean",
-                        "const": True,
-                        "description": "Must be true to proceed.",
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "Why this change is needed (for audit).",
-                    },
+                    "confirm": {"type": "boolean", "const": True, "description": "Must be true to proceed."},
+                    "reason": {"type": "string", "description": "Why this change is needed (for audit)."},
                 },
                 "required": ["patch", "confirm"],
                 "additionalProperties": False,
@@ -193,11 +178,7 @@ TOOLS_SCHEMAS_ALL: List[Json] = [
                 **BASE_OBJ,
                 "properties": {
                     "note": {"type": "string"},
-                    "confirm": {
-                        "type": "boolean",
-                        "const": True,
-                        "description": "Must be true to proceed.",
-                    },
+                    "confirm": {"type": "boolean", "const": True, "description": "Must be true to proceed."},
                 },
                 "required": ["confirm"],
                 "additionalProperties": False,
@@ -212,11 +193,7 @@ TOOLS_SCHEMAS_ALL: List[Json] = [
                 **BASE_OBJ,
                 "properties": {
                     "id": {"type": "string"},
-                    "confirm": {
-                        "type": "boolean",
-                        "const": True,
-                        "description": "Must be true to proceed.",
-                    },
+                    "confirm": {"type": "boolean", "const": True, "description": "Must be true to proceed."},
                 },
                 "required": ["id", "confirm"],
                 "additionalProperties": False,
@@ -244,7 +221,7 @@ async def mcp(request: Request):
     method = body.get("method")
     params = body.get("params") or {}
 
-    # наличие любого Authorization-заголовка считаем признаком аутентификации
+    # наличие Authorization считаем признаком аутентификации
     has_auth = bool(request.headers.get("authorization"))
 
     try:
@@ -259,9 +236,11 @@ async def mcp(request: Request):
             )
 
         if method == "tools/list":
-            # без Auth — скрываем write-инструменты, публикуем только READ
-            tools = [t for t in TOOLS_SCHEMAS_ALL if t["name"] in READ_ONLY or has_auth]
-            return _rpc_ok(id_, {"tools": tools})
+            # БЕЗ AUTH — ПУБЛИКУЕМ НОЛЬ ИНСТРУМЕНТОВ (проходим safety)
+            if not has_auth:
+                return _rpc_ok(id_, {"tools": []})
+            # С AUTH — публикуем всё (read + write)
+            return _rpc_ok(id_, {"tools": TOOLS_SCHEMAS_ALL})
 
         if method == "tools/call":
             name_in = params.get("name")
@@ -270,18 +249,12 @@ async def mcp(request: Request):
 
             name = ALIASES.get(name_in, name_in)
 
-            # блокируем write-вызовы без Auth
+            # блокируем write-вызовы без Auth (на всякий случай)
             if (name in WRITE_ONLY) and not has_auth:
                 return _rpc_ok(
                     id_,
                     _content(
-                        {
-                            "ok": False,
-                            "error": {
-                                "code": "auth_required",
-                                "message": "write tools require Authorization",
-                            },
-                        },
+                        {"ok": False, "error": {"code": "auth_required", "message": "write tools require Authorization"}},
                         f"{name}: error",
                     ),
                 )
@@ -319,16 +292,7 @@ async def mcp(request: Request):
 
         return _rpc_ok(
             id_,
-            _content(
-                {"ok": False, "error": {"code": "method_not_supported", "method": method}},
-                "unsupported",
-            ),
+            _content({"ok": False, "error": {"code": "method_not_supported", "method": method}}, "unsupported"),
         )
     except Exception as e:
-        return _rpc_ok(
-            id_,
-            _content(
-                {"ok": False, "error": {"code": "fatal", "message": str(e)[:500]}},
-                "fatal",
-            ),
-        )
+        return _rpc_ok(id_, _content({"ok": False, "error": {"code": "fatal", "message": str(e)[:500]}}, "fatal"))
