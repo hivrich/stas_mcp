@@ -6,7 +6,7 @@ from typing import Any, Dict, Tuple, List, Callable, Awaitable
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-# импортируем ваши реализации тулов
+# импортируем реализации тулов
 from src.mcp.tools_read import user_summary_fetch, user_last_training_fetch
 from src.mcp.tools_plan import (
     plan_list, plan_status, plan_update, plan_publish, plan_delete, plan_validate
@@ -46,7 +46,7 @@ def _okify(payload: Json) -> Json:
     return payload if "ok" in payload else {"ok": True, **payload}
 
 # ---------------- registry ----------------
-# Публикуем ИМЕНА БЕЗ ТОЧЕК (snake_case) — так требует ряд клиентов/билдеров.
+# Публикуем ИМЕНА БЕЗ ТОЧЕК (snake_case)
 TOOLS: Dict[str, AsyncTool] = {
     "user_summary_fetch": user_summary_fetch,
     "user_last_training_fetch": user_last_training_fetch,
@@ -57,7 +57,7 @@ TOOLS: Dict[str, AsyncTool] = {
     "plan_delete":   plan_delete,
     "plan_validate": plan_validate,
 }
-# Принимаем легаси-алиасы с точками (вызовы из старых клиентов)
+# Принимаем легаси-алиасы с точками (совместимость вызовов)
 ALIASES: Dict[str, str] = {
     "user.summary.fetch": "user_summary_fetch",
     "user.last_training.fetch": "user_last_training_fetch",
@@ -71,11 +71,12 @@ ALIASES: Dict[str, str] = {
 
 # JSON Schema для входов. Публикуем ОДНУ схему под ДВУМЯ ключами
 # (inputSchema — как в доке OpenAI; input_schema — для совместимости некоторых билдеров).
+BASE_OBJ: Json = {"type": "object"}
+
 def both_keys(schema_obj: Json) -> Json:
     return {"inputSchema": schema_obj, "input_schema": schema_obj}
 
-BASE_OBJ = {"type": "object"}  # без $schema — проще для некоторых парсеров
-
+# ---------------- schemas (write-действия требуют confirm:true) ----------------
 TOOLS_SCHEMAS: List[Json] = [
     {
         "name": "user_summary_fetch",
@@ -122,11 +123,51 @@ TOOLS_SCHEMAS: List[Json] = [
             "additionalProperties": False,
         }),
     },
-    # простые безаргументные — голый объект, без запретов
+
+    # ---- WRITE actions (dangerous): require confirm:true ----
+    {
+        "name": "plan_update",
+        "description": "Update plan entities (dangerous; requires confirm:true).",
+        **both_keys({
+            **BASE_OBJ,
+            "properties": {
+                "patch": {"type": "object"},
+                "confirm": {"type": "boolean", "const": True, "description": "Must be true to proceed."},
+                "reason": {"type": "string", "description": "Why this change is needed (for audit)."}
+            },
+            "required": ["patch", "confirm"],
+            "additionalProperties": False,
+        }),
+    },
+    {
+        "name": "plan_publish",
+        "description": "Publish pending changes (dangerous; requires confirm:true).",
+        **both_keys({
+            **BASE_OBJ,
+            "properties": {
+                "note": {"type": "string"},
+                "confirm": {"type": "boolean", "const": True, "description": "Must be true to proceed."}
+            },
+            "required": ["confirm"],
+            "additionalProperties": False,
+        }),
+    },
+    {
+        "name": "plan_delete",
+        "description": "Delete a plan item (dangerous; requires confirm:true).",
+        **both_keys({
+            **BASE_OBJ,
+            "properties": {
+                "id": {"type": "string"},
+                "confirm": {"type": "boolean", "const": True, "description": "Must be true to proceed."}
+            },
+            "required": ["id", "confirm"],
+            "additionalProperties": False,
+        }),
+    },
+
+    # ---- SAFE misc ----
     {"name":"plan_status",  "description":"Get current plan status",   **both_keys({"type":"object"})},
-    {"name":"plan_update",  "description":"Update plan entities",      **both_keys({**BASE_OBJ,"properties":{"patch":{"type":"object"}},"required":["patch"],"additionalProperties":False})},
-    {"name":"plan_publish", "description":"Publish pending changes",   **both_keys({"type":"object"})},
-    {"name":"plan_delete",  "description":"Delete a plan item",        **both_keys({**BASE_OBJ,"properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":False})},
     {"name":"plan_validate","description":"Validate plan consistency", **both_keys({"type":"object"})},
 ]
 
@@ -159,7 +200,6 @@ async def mcp(request: Request):
     try:
         if method == "initialize":
             # оф. гайд OpenAI: protocolVersion + capabilities.tools + serverInfo
-            # https://developers.openai.com/apps-sdk/concepts/mcp-server/
             return _rpc_ok(id_, {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {"listChanged": False}},
