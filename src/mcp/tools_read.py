@@ -217,21 +217,19 @@ def has_tool(name: str) -> bool:
 
 
 async def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-    import json as _json  # локально, чтобы не конфликтовало
+    import json as _json
     def _err(code: int, message: str, data: Any | None = None) -> Dict[str, Any]:
-        payload = {"ok": False, "error": {"code": code, "message": message}}
+        payload = {"ok": False, "error": {"code": int(code), "message": str(message)}}
         if data is not None:
             payload["error"]["data"] = data
         return _ok_json(payload)
 
     try:
-        # ← Толерантность к строковым args (на всякий случай, если сервер уже не распарсил)
         if isinstance(arguments, str):
             try:
                 arguments = _json.loads(arguments)
             except Exception as _e:
-                return _err(424, f"invalid arguments (expected JSON object, got str): {_e}")
-
+                return _err(424, f"invalid arguments JSON: {_e}")
         if not isinstance(arguments, dict):
             return _err(424, f"invalid arguments type: {type(arguments)} (expected object)")
 
@@ -255,7 +253,6 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                 if newest_d and d > newest_d:
                     continue
                 with_dates.append((d, it))
-
             last = with_dates and sorted(with_dates, key=lambda x: x[0])[-1][1] or None
             return _ok_json({"ok": True, "last": last, "count": len(items), "range": rng})
 
@@ -265,21 +262,41 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             oldest = arguments.get("oldest")
             newest = arguments.get("newest")
             limit = arguments.get("limit")
-
             events, rng = await _read_plan_events(user_id, oldest, newest)
             if isinstance(limit, int) and limit > 0:
                 events = events[-limit:]
-
             return _ok_json({"ok": True, "items": events, "count": len(events), "range": rng})
 
-        # неизвестный инструмент
         return _err(404, f"unknown tool '{name}'")
 
     except httpx.HTTPStatusError as exc:
-        # мягкий ответ вместо исключения
         st = int(getattr(exc, "response", None).status_code or 424)
         return _err(424, f"upstream {st}: {exc}")
     except Exception as exc:
-        # общая защита — тоже мягкий ответ
         return _err(424, f"tool '{name}' failed: {exc}")
+
+
+# --- helpers: envelope with json + short text --------------------------------
+def _summarize_for_text(obj: Any) -> str:
+    try:
+        if isinstance(obj, dict) and obj.get("ok") is False:
+            e = obj.get("error", {})
+            return f"error {e.get('code', '')}: {e.get('message', 'unknown')}"
+        if isinstance(obj, dict) and {"count", "range"} <= set(obj.keys()):
+            rng = obj.get("range") or {}
+            return f"ok: {obj.get('count', 0)} items, window {rng.get('oldest','?')}..{rng.get('newest','?')}"
+        if isinstance(obj, dict) and "info" in obj:
+            return "ok: user summary loaded"
+        return "ok"
+    except Exception:
+        return "ok"
+
+def _ok_json(obj: Any) -> Dict[str, Any]:
+    # всегда два контента: json + text (для UI, который показывает только text)
+    return {
+        "content": [
+            {"type": "json", "json": obj},
+            {"type": "text", "text": _summarize_for_text(obj)},
+        ]
+    }
 
