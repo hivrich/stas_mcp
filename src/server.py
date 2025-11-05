@@ -395,13 +395,18 @@ async def mcp_rpc(request: Request) -> JSONResponse:
     if method == "tools/call":
     name = str(params.get("name") or "").strip()
 
+    # --- tolerant arguments parsing: supports params.arguments OR params.args ---
     def _normalize_arguments(p: dict) -> dict:
         raw = p.get("arguments", p.get("args", {}))
+
+        # bytes -> str
         if isinstance(raw, (bytes, bytearray)):
             try:
                 raw = raw.decode("utf-8", "strict")
             except Exception:
                 pass
+
+        # str(JSON) -> dict
         if isinstance(raw, str):
             s = raw.strip()
             try:
@@ -409,15 +414,20 @@ async def mcp_rpc(request: Request) -> JSONResponse:
             except Exception as exc:
                 logging.warning("tools/call: arguments JSON parse error: %s; sample=%r", exc, s[:200])
                 raise ValueError(f"arguments: invalid JSON string: {exc}")
+
+        # dict -> ok
         if isinstance(raw, dict):
             return raw
+
         raise ValueError(f"arguments: unsupported type {type(raw)}; expected object or JSON string")
 
     try:
         arguments = _normalize_arguments(params)
     except ValueError as exc:
+        # HTTP 200 с JSON-RPC ошибкой — чтобы клиент не видел http_error
         return rpc_err(rpc_id, -32602, "Invalid params", str(exc))
 
+    # x-connection-id из заголовка/квери/аргументов
     connection_id = (
         request.headers.get("x-connection-id")
         or request.headers.get("x-conn")
@@ -426,14 +436,17 @@ async def mcp_rpc(request: Request) -> JSONResponse:
     )
 
     try:
+        # session.* (можно оставить; по умолчанию лучше не вызывать из GPT)
         if mcp_tools_session.has_tool(name):
             result = await mcp_tools_session.call_tool(name, arguments)
             return rpc_ok(rpc_id, _tool_json_content(result))
 
+        # read-tools (summary / last_training / plan.list)
         if mcp_tools_read.has_tool(name):
             result = await mcp_tools_read.call_tool(name, arguments)
-            return rpc_ok(rpc_id, result)
+            return rpc_ok(rpc_id, result)  # уже в формате {"content":[...]}
 
+        # plan.*
         if name == "plan.validate":
             result = await plan_validate(arguments)
             return rpc_ok(rpc_id, _tool_json_content(result))
@@ -465,11 +478,14 @@ async def mcp_rpc(request: Request) -> JSONResponse:
             return rpc_ok(rpc_id, _tool_json_content(result))
 
         return rpc_err(rpc_id, -32601, f"Method tools/call: unknown tool '{name}'")
+
     except (mcp_tools_read.ToolError, tools_plan_write_ext.ToolError) as exc:  # type: ignore[attr-defined]
+        # прокинем наш код/сообщение как JSON-RPC error (HTTP 200)
         return rpc_err(rpc_id, getattr(exc, "code", 424) or 424, getattr(exc, "message", str(exc)))
-    except Exception as exc:
+    except Exception as exc:  # defensive
         logging.exception("tools/call unhandled exception: %s", exc)
         return rpc_err(rpc_id, -32000, "Tool execution error", str(exc))
+
 
     # --- resources/* ---
     if method == "resources/list":
