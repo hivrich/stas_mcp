@@ -1,10 +1,11 @@
+# src/mcp/tools_read.py
 from __future__ import annotations
-import os
-import json
+import os, json, base64
 from typing import Any, Dict, Tuple, Optional
 from datetime import datetime, timedelta
-
 import aiohttp
+
+__all__ = ["user_summary_fetch", "user_last_training_fetch"]
 
 def _window_14d() -> Tuple[str, str]:
     newest = datetime.utcnow().date()
@@ -23,7 +24,6 @@ def _auth_bearer(user_id: Optional[int]) -> Optional[str]:
         return None
     try:
         payload = json.dumps({"uid": int(user_id)}).encode("utf-8")
-        import base64
         b = base64.urlsafe_b64encode(payload).decode("utf-8").rstrip("=")
         return f"t_{b}"
     except Exception:
@@ -37,11 +37,11 @@ async def _http_json(session: aiohttp.ClientSession, url: str, bearer: Optional[
     if bearer:
         headers["Authorization"] = f"Bearer {bearer}"
     async with session.get(url, headers=headers, timeout=30) as r:
-        text = await r.text()
+        txt = await r.text()
         try:
-            return json.loads(text)
+            return json.loads(txt)
         except Exception:
-            return {"raw": text, "status": r.status}
+            return {"raw": txt, "status": r.status}
 
 def _ok(data: Dict[str, Any], label: str):
     return {"ok": True, **data}, f"{label}: ok"
@@ -54,7 +54,6 @@ async def user_summary_fetch(arguments: Dict[str, Any]):
     bearer = _auth_bearer(user_id)
     if not bearer:
         return _err("not_linked", "user_id не указан и токен не найден; сначала выполните линк или передайте user_id", "user.summary.fetch")
-
     base = _base_pub()
     url = f"{base}/profile/summary"
     async with aiohttp.ClientSession() as s:
@@ -66,18 +65,14 @@ async def user_last_training_fetch(arguments: Dict[str, Any]):
     bearer = _auth_bearer(user_id)
     if not bearer:
         return _err("not_linked", "user_id не указан и токен не найден; сначала выполните линк или передайте user_id", "user.last_training.fetch")
-
     oldest = _get(arguments, "oldest")
     newest = _get(arguments, "newest")
     if not (oldest and newest):
         oldest, newest = _window_14d()
-
     base = _base_pub()
     url = f"{base}/trainings?oldest={oldest}&newest={newest}"
-
     async with aiohttp.ClientSession() as s:
         data = await _http_json(s, url, bearer)
-
     if isinstance(data, list):
         payload = {"count": len(data), "items": data, "window": {"oldest": oldest, "newest": newest}}
     else:
