@@ -63,10 +63,12 @@ BRIDGE_BASE = settings.BRIDGE_BASE.rstrip("/")
 MODE = "bridge" if BRIDGE_BASE else "stub"
 
 app = FastAPI()
+
+# === httpx client pool (ускоряет апстрим-вызовы) ===
 HTTP_CLIENT: httpx.AsyncClient | None = None
 
 @app.on_event("startup")
-async def _startup():
+async def _startup() -> None:
     global HTTP_CLIENT
     HTTP_CLIENT = httpx.AsyncClient(
         timeout=httpx.Timeout(30.0),
@@ -76,21 +78,27 @@ async def _startup():
     )
 
 @app.on_event("shutdown")
-async def _shutdown():
+async def _shutdown() -> None:
     global HTTP_CLIENT
     if HTTP_CLIENT:
         await HTTP_CLIENT.aclose()
         HTTP_CLIENT = None
-# === /pooled httpx client ===
+# === /httpx client pool ===
 
+# CORS под ChatGPT
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://chatgpt.com", "https://staging.chatgpt.com", "https://chat.openai.com"],
+    allow_origins=[
+        "https://chatgpt.com",
+        "https://staging.chatgpt.com",
+        "https://chat.openai.com",
+    ],
     allow_credentials=False,
-    allow_methods=["POST", "OPTIONS", "GET"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["content-type", "authorization", "accept"],
     max_age=86400,
 )
+
 app.include_router(read_user_router)
 
 MANIFEST_SCHEMA_URI = "http://json-schema.org/draft-07/schema#"
@@ -158,11 +166,12 @@ def _plan_tool_definitions(draft_schema: Dict[str, Any]) -> List[Dict[str, Any]]
 
 
 def _combined_tool_definitions() -> List[Dict[str, Any]]:
-    # То же для UI-манифеста
+    # Для UI/манифеста
     draft_schema = _draft_input_schema()
     plan_tools = _plan_tool_definitions(draft_schema)
     read_tools = mcp_tools_read.get_tool_definitions()
-    return [*plan_tools, *read_tools]
+    session_tools = mcp_tools_session.get_tool_definitions()
+    return [*plan_tools, *read_tools, *session_tools]
 
 
 def build_manifest() -> Dict[str, Any]:
@@ -206,16 +215,7 @@ def build_manifest() -> Dict[str, Any]:
             {
                 k: v
                 for k, v in tool.items()
-                if k
-                in (
-                    "id",
-                    "name",
-                    "description",
-                    "method",
-                    "path",
-                    "input_schema",
-                    "inputSchema",
-                )
+                if k in ("id", "name", "description", "method", "path", "input_schema", "inputSchema")
             }
             for tool in tools
         ],
@@ -225,23 +225,19 @@ def build_manifest() -> Dict[str, Any]:
 
 
 def _as_actions_from_tools(tools: list[dict]) -> list[dict]:
-    actions = []
+    actions: list[dict] = []
     for t in tools or []:
         _id = t.get("id") or t.get("name")
         _nm = t.get("name") or _id
         _ds = t.get("description", "")
-        sch = t.get("input_schema") or t.get("inputSchema")
-        if sch is None:
-            sch = {"type": "object"}
-        actions.append(
-            {
-                "id": _id,
-                "name": _nm,
-                "description": _ds,
-                "input_schema": sch,
-                "inputSchema": sch,
-            }
-        )
+        sch = t.get("input_schema") or t.get("inputSchema") or {"type": "object"}
+        actions.append({
+            "id": _id,
+            "name": _nm,
+            "description": _ds,
+            "input_schema": sch,
+            "inputSchema": sch,
+        })
     return actions
 
 
@@ -249,7 +245,7 @@ def _normalize_manifest_for_ui(manifest: dict) -> dict:
     m = dict(manifest or {})
     tools = m.get("tools") or m.get("actions") or []
     m["actions"] = _as_actions_from_tools(tools)
-    norm_tools = []
+    norm_tools: list[dict] = []
     for t in tools:
         t = dict(t)
         sch = t.get("input_schema") or t.get("inputSchema")
@@ -264,9 +260,11 @@ def _normalize_manifest_for_ui(manifest: dict) -> dict:
 
 
 def build_tools_for_rpc() -> List[Dict[str, Any]]:
-    # Только плановые + читающие инструменты. session.* не даём чату.
+    # Для tools/list показываем плановые + читающие + сессионные (если нужны)
     plan_tools = _plan_tool_definitions(_draft_input_schema())
     read_tools = mcp_tools_read.get_tool_definitions()
+    session_tools = mcp_tools_session.get_tool_definitions()
+
     tools: List[Dict[str, Any]] = [
         {
             "name": tool["name"],
@@ -276,6 +274,7 @@ def build_tools_for_rpc() -> List[Dict[str, Any]]:
         for tool in plan_tools
     ]
     tools.extend(read_tools)
+    tools.extend(session_tools)
     return tools
 
 
@@ -292,11 +291,7 @@ def _mcp_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
 
 
 def rpc_ok(rpc_id: Any, result: Any, *, status_code: int = 200) -> JSONResponse:
-    return JSONResponse(
-        {"jsonrpc": "2.0", "id": rpc_id, "result": result},
-        status_code=status_code,
-        headers=_mcp_headers(),
-    )
+    return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "result": result}, status_code=status_code, headers=_mcp_headers())
 
 
 def rpc_err(
@@ -325,22 +320,17 @@ def _tool_json_content(result: Any) -> Dict[str, Any]:
 async def mcp_options() -> Response:
     return Response(
         status_code=200,
-        headers=_mcp_headers(
-            {
-                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-                "Access-Control-Allow-Headers": "*",
-            }
-        ),
+        headers=_mcp_headers({
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }),
     )
 
 
 def _manifest_response() -> JSONResponse:
     manifest = build_manifest()
     manifest = _normalize_manifest_for_ui(manifest)
-    return JSONResponse(
-        manifest,
-        headers=_mcp_headers({"Access-Control-Allow-Methods": "GET, POST, OPTIONS"}),
-    )
+    return JSONResponse(manifest, headers=_mcp_headers({"Access-Control-Allow-Methods": "GET, POST, OPTIONS"}))
 
 
 @app.get("/mcp")
@@ -353,12 +343,7 @@ async def mcp_rpc(request: Request) -> JSONResponse:
     content_type = request.headers.get("content-type", "")
     media_type = content_type.split(";", 1)[0].strip().lower() if content_type else ""
     if media_type != "application/json":
-        return rpc_err(
-            None,
-            -32600,
-            "Unsupported Media Type: expected application/json",
-            status_code=415,
-        )
+        return rpc_err(None, -32600, "Unsupported Media Type: expected application/json", status_code=415)
 
     try:
         payload = await request.json()
@@ -378,6 +363,7 @@ async def mcp_rpc(request: Request) -> JSONResponse:
     if params and not isinstance(params, dict):
         return rpc_err(rpc_id, -32602, "Invalid params: expected object")
 
+    # --- initialize ---
     if method == "initialize":
         proto = params.get("protocolVersion") or MCP_PROTOCOL_VERSION
         result = {
@@ -390,11 +376,12 @@ async def mcp_rpc(request: Request) -> JSONResponse:
         }
         return rpc_ok(rpc_id, result)
 
-
+    # --- tools/list ---
     if method == "tools/list":
         tools = build_tools_for_rpc()
         return rpc_ok(rpc_id, {"tools": tools})
 
+    # --- tools/call ---
     if method == "tools/call":
         name = str(params.get("name") or "").strip()
         arguments = params.get("arguments") or {}
@@ -426,9 +413,7 @@ async def mcp_rpc(request: Request) -> JSONResponse:
                     hint = _link_hint(request, connection_id)
                     return rpc_ok(rpc_id, _tool_json_content(hint))
                 try:
-                    result = await tools_plan_write_ext.call_tool(
-                        name, payload_in, user_id=user_id
-                    )
+                    result = await tools_plan_write_ext.call_tool(name, payload_in, user_id=user_id)
                 except tools_plan_write_ext.ToolError as exc:
                     return rpc_err(rpc_id, exc.code, exc.message, exc.data)
                 return rpc_ok(rpc_id, _tool_json_content(result))
@@ -455,11 +440,12 @@ async def mcp_rpc(request: Request) -> JSONResponse:
                 return rpc_ok(rpc_id, _tool_json_content(result))
 
             return rpc_err(rpc_id, -32601, f"Method tools/call: unknown tool '{name}'")
-        except (mcp_tools_read.ToolError, tools_plan_write_ext.ToolError) as exc:
-            return rpc_err(rpc_id, exc.code, exc.message, exc.data)
+        except (mcp_tools_read.ToolError, tools_plan_write_ext.ToolError) as exc:  # type: ignore[attr-defined]
+            return rpc_err(rpc_id, exc.code, exc.message, getattr(exc, "data", None))
         except Exception as exc:  # pragma: no cover - defensive guard
             return rpc_err(rpc_id, -32000, "Tool execution error", str(exc))
 
+    # --- resources/* ---
     if method == "resources/list":
         resources = mcp_resources_user.list_resources()
         return rpc_ok(rpc_id, {"resources": resources})
@@ -467,19 +453,19 @@ async def mcp_rpc(request: Request) -> JSONResponse:
     if method == "resources/read":
         uri = params.get("uri")
         if not isinstance(uri, str) or not uri.strip():
-            return rpc_err(
-                rpc_id, -32602, "Invalid params: uri must be a non-empty string"
-            )
+            return rpc_err(rpc_id, -32602, "Invalid params: uri must be a non-empty string")
         try:
             result = await mcp_resources_user.read_resource(uri.strip())
-        except mcp_resources_user.ResourceError as exc:
-            return rpc_err(rpc_id, exc.code, exc.message, exc.data)
+        except mcp_resources_user.ResourceError as exc:  # type: ignore[attr-defined]
+            return rpc_err(rpc_id, exc.code, exc.message, getattr(exc, "data", None))
         except Exception as exc:  # pragma: no cover - defensive guard
             return rpc_err(rpc_id, -32001, "Resource read error", str(exc))
         return rpc_ok(rpc_id, result)
 
     return rpc_err(rpc_id, -32601, f"Unknown method '{method}'")
 
+
+# ===== helpers =====
 
 def _load_links() -> Dict[str, str]:
     try:
@@ -489,9 +475,7 @@ def _load_links() -> Dict[str, str]:
 
 
 def _save_links(data: Dict[str, str]) -> None:
-    LINKS_FILE.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    LINKS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _append_audit(entry: Dict[str, Any]) -> None:
@@ -522,9 +506,7 @@ def _resolve_user_id(conn_id: Optional[str]) -> Optional[str]:
 
 def _bearer(uid: str) -> str:
     payload = json.dumps({"uid": int(uid)})
-    token = (
-        base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
-    )
+    token = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
     return f"t_{token}"
 
 
@@ -540,28 +522,17 @@ async def gw(
     if not BRIDGE_BASE:
         raise httpx.RequestError("BRIDGE_BASE not configured")
     url = f"{BRIDGE_BASE}{path}"
-    token = (
-        "t_" + base64.urlsafe_b64encode(json.dumps({"uid": int(uid)}).encode())
-        .decode()
-        .rstrip("=")
-    )
-    headers = {"Authorization": f"Bearer {token}", "User-Agent": ua}
+    headers = {"Authorization": f"Bearer {_bearer(uid)}", "User-Agent": ua}
 
     assert HTTP_CLIENT is not None, "HTTP client not initialized"
     t0 = time.perf_counter()
     try:
-        resp = await HTTP_CLIENT.request(
-            method.upper(),
-            url,
-            params=params,
-            json=json_payload,
-            headers=headers,
-        )
+        resp = await HTTP_CLIENT.request(method.upper(), url, params=params, json=json_payload, headers=headers)
         resp.raise_for_status()
         if resp.headers.get("content-type", "").startswith("application/json"):
             return resp.json()
         return resp.text
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - trace
         dt_ms = int((time.perf_counter() - t0) * 1000)
         logger.error("gw %s %s failed in %dms: %s", method, path, dt_ms, exc)
         raise
@@ -577,16 +548,11 @@ def _draft_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _request_ua(request: Request) -> str:
-    ua = request.headers.get("user-agent") or "ChatGPT-User/1.0"
-    return ua
+    return request.headers.get("user-agent") or "ChatGPT-User/1.0"
 
 
 def _unique_days(events: Sequence[Dict[str, Any]]) -> int:
-    days = {
-        str(event.get("start_date_local", ""))[:10]
-        for event in events
-        if isinstance(event, dict)
-    }
+    days = {str(event.get("start_date_local", ""))[:10] for event in events if isinstance(event, dict)}
     return len({d for d in days if d})
 
 
@@ -609,28 +575,18 @@ def _build_events(draft: Dict[str, Any], external_id: str) -> List[Dict[str, Any
         if not isinstance(date, str) or not date:
             continue
         day_title = day.get("title") if isinstance(day.get("title"), str) else None
-        blocks = (
-            [block for block in day.get("blocks", []) if isinstance(block, dict)]
-            if isinstance(day.get("blocks"), list)
-            else []
-        )
+        blocks = [block for block in (day.get("blocks") or []) if isinstance(block, dict)] if isinstance(day.get("blocks"), list) else []
         target_blocks = blocks if blocks else [None]
         for block in target_blocks:
-            block_title = (
-                block.get("title")
-                if isinstance(block, dict) and isinstance(block.get("title"), str)
-                else None
-            )
-            events.append(
-                {
-                    "start_date_local": f"{date}T09:00:00",
-                    "type": "Workout",
-                    "name": _event_name(block_title, day_title),
-                    "description": day_title or block_title or "Workout",
-                    "category": "WORKOUT",
-                    "external_id": external_id,
-                }
-            )
+            block_title = block.get("title") if isinstance(block, dict) and isinstance(block.get("title"), str) else None
+            events.append({
+                "start_date_local": f"{date}T09:00:00",
+                "type": "Workout",
+                "name": _event_name(block_title, day_title),
+                "description": day_title or block_title or "Workout",
+                "category": "WORKOUT",
+                "external_id": external_id,
+            })
     return events
 
 
@@ -665,15 +621,7 @@ def _pick_last_training(payload: Any) -> Optional[Dict[str, Any]]:
     pool = finished or candidates
 
     def key(item: Dict[str, Any]) -> dt.datetime:
-        for field in (
-            "finished_at",
-            "completed_at",
-            "end_at",
-            "end_time",
-            "start_time",
-            "start_date_local",
-            "date",
-        ):
+        for field in ("finished_at", "completed_at", "end_at", "end_time", "start_time", "start_date_local", "date"):
             value = item.get(field)
             if isinstance(value, str):
                 parsed = _parse_iso(value)
@@ -705,13 +653,10 @@ def _link_hint(request: Request, connection_id: Optional[str]) -> Dict[str, Any]
         uri = f"{base}?connection_id={connection_id}"
     else:
         uri = base
-    return {
-        "ok": False,
-        "need_link": True,
-        "hint": "Open /link and map connection_id→user_id",
-        "uri": uri,
-    }
+    return {"ok": False, "need_link": True, "hint": "Open /link and map connection_id→user_id", "uri": uri}
 
+
+# ===== simple HTTP endpoints =====
 
 @app.get("/healthz")
 async def healthz() -> Dict[str, Any]:
@@ -721,12 +666,7 @@ async def healthz() -> Dict[str, Any]:
 @app.get("/whoami")
 async def whoami() -> Dict[str, Any]:
     links = _load_links()
-    return {
-        "ok": True,
-        "mode": MODE,
-        "bridge_base": BRIDGE_BASE,
-        "links": len(links),
-    }
+    return {"ok": True, "mode": MODE, "bridge_base": BRIDGE_BASE, "links": len(links)}
 
 
 def _mask_connection_id(connection_id: str) -> str:
@@ -741,10 +681,7 @@ def _linking_status(connection_id: str) -> Dict[str, Any]:
         try:
             linking_set_linked(connection_id, int(persisted))
         except (TypeError, ValueError):
-            logger.debug(
-                "Skipping persisted user_id that is not int for %s",
-                _mask_connection_id(connection_id),
-            )
+            logger.debug("Skipping persisted user_id that is not int for %s", _mask_connection_id(connection_id))
     status = linking_get_status(connection_id)
     if status.get("linked") and "user_id" not in status and persisted:
         try:
@@ -760,10 +697,7 @@ async def api_whoami(request: Request) -> Dict[str, Any]:
     if not connection_id:
         raise HTTPException(status_code=422, detail="connection_id is required")
     status = _linking_status(connection_id)
-    response: Dict[str, Any] = {
-        "connection_id": connection_id,
-        "linked": bool(status.get("linked")),
-    }
+    response: Dict[str, Any] = {"connection_id": connection_id, "linked": bool(status.get("linked"))}
     if status.get("user_id") is not None:
         response["user_id"] = status["user_id"]
     return response
@@ -777,14 +711,9 @@ async def api_link(connection_id: str = Query(..., min_length=1)) -> Dict[str, A
     instructions = [
         "Откройте страницу авторизации STAS и подтвердите доступ для соединения.",
         "Скопируйте одноразовый code и вызовите POST /auth/exchange",
-        'Передайте JSON: {"connection_id": "%s", "code": "<CODE>"} внутри MCP.'
-        % connection_id,
+        'Передайте JSON: {"connection_id": "%s", "code": "<CODE>"} внутри MCP.' % connection_id,
     ]
-    payload: Dict[str, Any] = {
-        "connection_id": connection_id,
-        "linked": bool(status.get("linked")),
-        "instructions": instructions,
-    }
+    payload: Dict[str, Any] = {"connection_id": connection_id, "linked": bool(status.get("linked")), "instructions": instructions}
     if status.get("user_id") is not None:
         payload["user_id"] = status["user_id"]
     return payload
@@ -827,9 +756,7 @@ async def link_save(request: Request) -> Dict[str, Any]:
 
 
 @app.post("/mcp/connect")
-async def mcp_connect(
-    request: Request, payload: Optional[Dict[str, Any]] = Body(default=None)
-) -> Dict[str, Any]:
+async def mcp_connect(request: Request, payload: Optional[Dict[str, Any]] = Body(default=None)) -> Dict[str, Any]:
     payload = payload or {}
     conn_id = _resolve_connection_id(request, payload)
     if not conn_id:
@@ -885,12 +812,7 @@ async def resource_get(name: str, request: Request) -> Any:
                 if isinstance(value, list):
                     count = len(value)
                     break
-        return {
-            "ok": bool(latest),
-            "last": latest,
-            "range": {"oldest": oldest, "newest": newest},
-            "count": count,
-        }
+        return {"ok": bool(latest), "last": latest, "range": {"oldest": oldest, "newest": newest}, "count": count}
 
     if name == "schema.plan.json":
         return JSONResponse(load_schema())
@@ -898,40 +820,27 @@ async def resource_get(name: str, request: Request) -> Any:
     return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
 
 
+# ===== plan tools HTTP handlers (переиспользуются в tools/call) =====
+
 @app.post("/mcp/tool/plan.validate")
 async def plan_validate(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     draft = _draft_from_payload(payload)
     if not draft:
-        return {
-            "ok": False,
-            "errors": [{"path": [], "message": "Invalid plan payload"}],
-            "warnings": [],
-            "diff": {},
-        }
+        return {"ok": False, "errors": [{"path": [], "message": "Invalid plan payload"}], "warnings": [], "diff": {}}
 
-    errors = [
-        {"path": list(error.absolute_path), "message": error.message}
-        for error in PLAN_VALIDATOR.iter_errors(draft)
-    ]
+    errors = [{"path": list(error.absolute_path), "message": error.message} for error in PLAN_VALIDATOR.iter_errors(draft)]
     return {"ok": not errors, "errors": errors, "warnings": [], "diff": {}}
 
 
 @app.post("/mcp/tool/plan.publish")
-async def plan_publish(
-    request: Request, payload: Dict[str, Any] = Body(...)
-) -> Dict[str, Any]:
+async def plan_publish(request: Request, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {"ok": False, "error": "invalid_payload"}
 
     draft = _draft_from_payload(payload)
     draft_days = draft.get("days") if isinstance(draft.get("days"), list) else None
-    raw_external_id_input = str(
-        payload.get("external_id") or draft.get("external_id") or ""
-    )
-    raw_external_id, normalized_external_id = normalize_plan_external_id(
-        raw_external_id_input,
-        days=draft_days,
-    )
+    raw_external_id_input = str(payload.get("external_id") or draft.get("external_id") or "")
+    raw_external_id, normalized_external_id = normalize_plan_external_id(raw_external_id_input, days=draft_days)
     events = _build_events(draft, normalized_external_id)
 
     conn_id = _resolve_connection_id(request, payload)
@@ -940,17 +849,12 @@ async def plan_publish(
         return _link_hint(request, conn_id)
 
     if not events:
-        return {
-            "ok": False,
-            "error": "no_events",
-            "hint": "Provide at least one day/block",
-        }
+        return {"ok": False, "error": "no_events", "hint": "Provide at least one day/block"}
 
     ua = _request_ua(request)
     params = {"external_id_prefix": "plan:"}
 
     summary: Dict[str, Any] = {}
-    dry_response: Dict[str, Any] | None = None
     if not payload.get("confirm"):
         try:
             dry_response = await gw(
@@ -973,13 +877,7 @@ async def plan_publish(
             "status": "preview",
             "days_written": _unique_days(events),
             "events": len(events),
-            "dry_run": {
-                "count": (
-                    int(dry_response.get("count", len(events)))
-                    if isinstance(dry_response, dict)
-                    else len(events)
-                )
-            },
+            "dry_run": {"count": int(dry_response.get("count", len(events)) if isinstance(dry_response, dict) else len(events))},
         }
 
     try:
@@ -996,9 +894,7 @@ async def plan_publish(
 
     if isinstance(real_response, dict):
         summary = {
-            "count": int(
-                real_response.get("count") or real_response.get("events") or len(events)
-            ),
+            "count": int(real_response.get("count") or real_response.get("events") or len(events)),
             "updated": real_response.get("updated"),
         }
         if "etag" in real_response:
@@ -1023,23 +919,12 @@ async def plan_publish(
         result["updated"] = updated
         if not updated:
             result["no_op"] = True
-    _append_audit(
-        {
-            "ts": int(time.time()),
-            "connection_id": conn_id,
-            "user_id": user_id,
-            "op": "publish",
-            "external_id": normalized_external_id,
-            "status": "ok",
-        }
-    )
+    _append_audit({"ts": int(time.time()), "connection_id": conn_id, "user_id": user_id, "op": "publish", "external_id": normalized_external_id, "status": "ok"})
     return result
 
 
 @app.post("/mcp/tool/plan.delete")
-async def plan_delete(
-    request: Request, payload: Dict[str, Any] = Body(...)
-) -> Dict[str, Any]:
+async def plan_delete(request: Request, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {"ok": False, "error": "invalid_payload"}
 
@@ -1055,43 +940,19 @@ async def plan_delete(
     window = _window_for_external(external_id)
 
     if not payload.get("confirm"):
-        return {
-            "ok": False,
-            "need_confirm": True,
-            "hint": "Add confirm:true",
-            "external_id": external_id,
-            "window": window,
-        }
+        return {"ok": False, "need_confirm": True, "hint": "Add confirm:true", "external_id": external_id, "window": window}
 
     ua = _request_ua(request)
     try:
-        delete_response = await gw(
-            "DELETE",
-            "/icu/events",
-            uid=user_id,
-            params={"external_id_prefix": "plan:", **window},
-            ua=ua,
-        )
+        delete_response = await gw("DELETE", "/icu/events", uid=user_id, params={"external_id_prefix": "plan:", **window}, ua=ua)
     except httpx.HTTPError as exc:
         return {"ok": False, "error": str(exc), "stage": "delete"}
 
-    _append_audit(
-        {
-            "ts": int(time.time()),
-            "connection_id": conn_id,
-            "user_id": user_id,
-            "op": "delete",
-            "external_id": external_id,
-            "status": "ok",
-        }
-    )
-    return {
-        "ok": True,
-        "external_id": external_id,
-        "window": window,
-        "response": delete_response,
-    }
+    _append_audit({"ts": int(time.time()), "connection_id": conn_id, "user_id": user_id, "op": "delete", "external_id": external_id, "status": "ok"})
+    return {"ok": True, "external_id": external_id, "window": window, "response": delete_response}
 
+
+# ===== SSE =====
 
 async def _sse_event_generator(request: Request):
     manifest = build_manifest()
@@ -1104,11 +965,7 @@ async def _sse_event_generator(request: Request):
 
 
 def _sse_response(request: Request) -> EventSourceResponse:
-    return EventSourceResponse(
-        _sse_event_generator(request),
-        media_type="text/event-stream",
-        headers={"Access-Control-Allow-Origin": "*"},
-    )
+    return EventSourceResponse(_sse_event_generator(request), media_type="text/event-stream", headers={"Access-Control-Allow-Origin": "*"})
 
 
 @app.get("/sse")
@@ -1116,12 +973,7 @@ async def sse(request: Request) -> EventSourceResponse:
     return _sse_response(request)
 
 
-@app.get("/mcp")
-async def mcp_get_manifest() -> JSONResponse:
-    manifest = build_manifest()
-    manifest = _normalize_manifest_for_ui(manifest)
-    return JSONResponse(manifest, headers={"Access-Control-Allow-Origin": "*"})
-
+# ===== CLI =====
 
 def main() -> None:  # pragma: no cover - CLI helper
     import argparse
