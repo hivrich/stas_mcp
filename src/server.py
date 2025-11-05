@@ -6,7 +6,7 @@ from typing import Any, Dict, Tuple, List
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-# абсолютные импорты под текущую структуру
+# абсолютные импорты под текущую структуру проекта
 from src.mcp.tools_read import user_summary_fetch, user_last_training_fetch
 from src.mcp.tools_plan import (
     plan_list, plan_status, plan_update, plan_publish, plan_delete, plan_validate
@@ -43,25 +43,37 @@ def _args_to_obj(arguments: Any) -> Tuple[Dict[str, Any], bool]:
 def _okify(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload if "ok" in payload else {"ok": True, **payload}
 
-# ---------------- registry ----------------
-
-TOOLS_REGISTRY = {
-    "user.summary.fetch": user_summary_fetch,
-    "user.last_training.fetch": user_last_training_fetch,
-    "plan.list":     plan_list,
-    "plan.status":   plan_status,
-    "plan.update":   plan_update,
-    "plan.publish":  plan_publish,
-    "plan.delete":   plan_delete,
-    "plan.validate": plan_validate,
+# ---------------- registry (каноника) ----------------
+# Внутренние ИМЕНА БЕЗ ТОЧЕК — их публикуем в tools/list
+TOOLS_REGISTRY: Dict[str, Any] = {
+    "user_summary_fetch": user_summary_fetch,
+    "user_last_training_fetch": user_last_training_fetch,
+    "plan_list":     plan_list,
+    "plan_status":   plan_status,
+    "plan_update":   plan_update,
+    "plan_publish":  plan_publish,
+    "plan_delete":   plan_delete,
+    "plan_validate": plan_validate,
 }
 
-# ВАЖНО: MCP ждёт **input_schema** (snake_case), а не inputSchema
+# Легаси-алиасы с точками — принимаем в tools/call, но НЕ публикуем
+LEGACY_ALIASES: Dict[str, str] = {
+    "user.summary.fetch": "user_summary_fetch",
+    "user.last_training.fetch": "user_last_training_fetch",
+    "plan.list": "plan_list",
+    "plan.status": "plan_status",
+    "plan.update": "plan_update",
+    "plan.publish": "plan_publish",
+    "plan.delete": "plan_delete",
+    "plan.validate": "plan_validate",
+}
+
+# ---------------- schemas (snake_case, без точек) ----------------
 JSON_SCHEMA_HDR = {"$schema": "https://json-schema.org/draft-07/schema#", "type": "object"}
 
 TOOLS_SCHEMAS: List[Dict[str, Any]] = [
     {
-        "name": "user.summary.fetch",
+        "name": "user_summary_fetch",
         "description": "Fetch user summary (linked account or explicit user_id).",
         "input_schema": {
             **JSON_SCHEMA_HDR,
@@ -74,7 +86,7 @@ TOOLS_SCHEMAS: List[Dict[str, Any]] = [
         },
     },
     {
-        "name": "user.last_training.fetch",
+        "name": "user_last_training_fetch",
         "description": "Return recent trainings in a date window.",
         "input_schema": {
             **JSON_SCHEMA_HDR,
@@ -89,7 +101,7 @@ TOOLS_SCHEMAS: List[Dict[str, Any]] = [
         },
     },
     {
-        "name": "plan.list",
+        "name": "plan_list",
         "description": "List workout plan events for a given window.",
         "input_schema": {
             **JSON_SCHEMA_HDR,
@@ -105,11 +117,11 @@ TOOLS_SCHEMAS: List[Dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
-    {"name":"plan.status","description":"Get current plan status","input_schema":{**JSON_SCHEMA_HDR,"properties":{},"required":[],"additionalProperties":False}},
-    {"name":"plan.update","description":"Update plan entities","input_schema":{**JSON_SCHEMA_HDR,"properties":{"patch":{"type":"object"}},"required":["patch"],"additionalProperties":False}},
-    {"name":"plan.publish","description":"Publish pending changes","input_schema":{**JSON_SCHEMA_HDR,"properties":{"note":{"type":"string"}},"required":[],"additionalProperties":False}},
-    {"name":"plan.delete","description":"Delete a plan item","input_schema":{**JSON_SCHEMA_HDR,"properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":False}},
-    {"name":"plan.validate","description":"Validate plan consistency","input_schema":{**JSON_SCHEMA_HDR,"properties":{},"required":[],"additionalProperties":False}},
+    {"name":"plan_status","description":"Get current plan status","input_schema":{**JSON_SCHEMA_HDR,"properties":{},"required":[],"additionalProperties":False}},
+    {"name":"plan_update","description":"Update plan entities","input_schema":{**JSON_SCHEMA_HDR,"properties":{"patch":{"type":"object"}},"required":["patch"],"additionalProperties":False}},
+    {"name":"plan_publish","description":"Publish pending changes","input_schema":{**JSON_SCHEMA_HDR,"properties":{"note":{"type":"string"}},"required":[],"additionalProperties":False}},
+    {"name":"plan_delete","description":"Delete a plan item","input_schema":{**JSON_SCHEMA_HDR,"properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":False}},
+    {"name":"plan_validate","description":"Validate plan consistency","input_schema":{**JSON_SCHEMA_HDR,"properties":{},"required":[],"additionalProperties":False}},
 ]
 
 # ---------------- health ----------------
@@ -151,15 +163,20 @@ async def mcp(request: Request):
             return _rpc_ok(id_, {"tools": TOOLS_SCHEMAS})
 
         if method == "tools/call":
-            name = params.get("name")
+            name_in = params.get("name")
             raw_args = params.get("arguments")
             args, was_string = _args_to_obj(raw_args)
+
+            # нормализуем имя: snake_case каноника или легаси с точками
+            name = name_in
+            if name not in TOOLS_REGISTRY and name in LEGACY_ALIASES:
+                name = LEGACY_ALIASES[name]
 
             handler = TOOLS_REGISTRY.get(name)
             if not handler:
                 return _rpc_ok(id_, _content(
-                    {"ok": False, "error": {"code": "tool_not_found", "name": name}},
-                    f"{name}: error"
+                    {"ok": False, "error": {"code": "tool_not_found", "name": name_in}},
+                    f"{name_in}: error"
                 ))
 
             try:
@@ -172,7 +189,7 @@ async def mcp(request: Request):
                     f"{name}: error"
                 ))
 
-        # Неподдерживаемый метод — мягко
+        # Неподдерживаемое — мягко
         return _rpc_ok(id_, _content({"ok": False, "error": {"code": "method_not_supported", "method": method}}, "unsupported"))
     except Exception as e:
         # Последний заслон от 4xx/5xx
