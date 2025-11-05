@@ -262,19 +262,17 @@ def _normalize_manifest_for_ui(manifest: dict) -> dict:
 def build_tools_for_rpc() -> List[Dict[str, Any]]:
     """
     Формируем список инструментов для tools/list.
-    Порядок добавления:
+    Порядок:
       1) плановые (validate/publish/delete/...),
-      2) читающие (user.summary.fetch / user.last_training.fetch / plan.list из tools_read),
+      2) читающие (user.summary.fetch / user.last_training.fetch / plan.list),
       3) сессионные.
-    При совпадении имён побеждает ПОСЛЕДНЕЕ определение (наши read-tools перекрывают старые).
+    При совпадении имён побеждает последнее определение (наши read-tools перекрывают старые).
     """
-    # 1) исходные наборы
     plan_tools = _plan_tool_definitions(_draft_input_schema())
     read_tools = mcp_tools_read.get_tool_definitions()
     session_tools = mcp_tools_session.get_tool_definitions()
 
-    # 2) дедупликация по имени (last-wins)
-    merged: dict[str, dict] = {}
+    merged: Dict[str, Dict[str, Any]] = {}
 
     def _merge(tools: Sequence[Dict[str, Any]]) -> None:
         for t in tools:
@@ -284,10 +282,9 @@ def build_tools_for_rpc() -> List[Dict[str, Any]]:
             merged[name] = t  # last-wins
 
     _merge(plan_tools)
-    _merge(read_tools)      # перекрывает старый plan.list «планового» набора
+    _merge(read_tools)      # перекрывает старый plan.list
     _merge(session_tools)
 
-    # 3) вернуть финальный список
     return list(merged.values())
 
 
@@ -398,23 +395,20 @@ async def mcp_rpc(request: Request) -> JSONResponse:
     if method == "tools/call":
     name = str(params.get("name") or "").strip()
 
-    # --- tolerant arguments parsing ---
     def _normalize_arguments(p: dict) -> dict:
         raw = p.get("arguments", p.get("args", {}))
-        # bytes/bytearray -> str
         if isinstance(raw, (bytes, bytearray)):
             try:
                 raw = raw.decode("utf-8", "strict")
             except Exception:
                 pass
-        # str -> json
         if isinstance(raw, str):
-            raw = raw.strip()
+            s = raw.strip()
             try:
-                return json.loads(raw) if raw else {}
+                return json.loads(s) if s else {}
             except Exception as exc:
+                logging.warning("tools/call: arguments JSON parse error: %s; sample=%r", exc, s[:200])
                 raise ValueError(f"arguments: invalid JSON string: {exc}")
-        # dict -> ok
         if isinstance(raw, dict):
             return raw
         raise ValueError(f"arguments: unsupported type {type(raw)}; expected object or JSON string")
@@ -424,7 +418,6 @@ async def mcp_rpc(request: Request) -> JSONResponse:
     except ValueError as exc:
         return rpc_err(rpc_id, -32602, "Invalid params", str(exc))
 
-    # extract connection_id (header or args)
     connection_id = (
         request.headers.get("x-connection-id")
         or request.headers.get("x-conn")
@@ -433,17 +426,14 @@ async def mcp_rpc(request: Request) -> JSONResponse:
     )
 
     try:
-        # session tools
         if mcp_tools_session.has_tool(name):
             result = await mcp_tools_session.call_tool(name, arguments)
             return rpc_ok(rpc_id, _tool_json_content(result))
 
-        # read tools
         if mcp_tools_read.has_tool(name):
             result = await mcp_tools_read.call_tool(name, arguments)
-            return rpc_ok(rpc_id, result)  # уже завернут {content:[...]}
-        
-        # plan.* tools
+            return rpc_ok(rpc_id, result)
+
         if name == "plan.validate":
             result = await plan_validate(arguments)
             return rpc_ok(rpc_id, _tool_json_content(result))
@@ -475,11 +465,10 @@ async def mcp_rpc(request: Request) -> JSONResponse:
             return rpc_ok(rpc_id, _tool_json_content(result))
 
         return rpc_err(rpc_id, -32601, f"Method tools/call: unknown tool '{name}'")
-
     except (mcp_tools_read.ToolError, tools_plan_write_ext.ToolError) as exc:  # type: ignore[attr-defined]
-        # прокидываем наш код/сообщение как JSON-RPC error (HTTP 200, чтобы api_tool не считал это сетевой ошибкой)
         return rpc_err(rpc_id, getattr(exc, "code", 424) or 424, getattr(exc, "message", str(exc)))
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception as exc:
+        logging.exception("tools/call unhandled exception: %s", exc)
         return rpc_err(rpc_id, -32000, "Tool execution error", str(exc))
 
     # --- resources/* ---
