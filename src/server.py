@@ -79,9 +79,8 @@ def _draft_input_schema() -> Dict[str, Any]:
     return schema
 
 
-def _base_tool_definitions() -> List[Dict[str, Any]]:
-    draft_schema = _draft_input_schema()
-    tools: List[Dict[str, Any]] = [
+def _plan_tool_definitions(draft_schema: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [
         {
             "id": "plan.validate",
             "name": "plan.validate",
@@ -128,13 +127,18 @@ def _base_tool_definitions() -> List[Dict[str, Any]]:
             },
         },
     ]
-    tools.extend(mcp_tools_read.get_tool_definitions())
-    return tools
+
+
+def _combined_tool_definitions() -> List[Dict[str, Any]]:
+    draft_schema = _draft_input_schema()
+    plan_tools = _plan_tool_definitions(draft_schema)
+    read_tools = mcp_tools_read.get_tool_definitions()
+    return [*plan_tools, *read_tools]
 
 
 def build_manifest() -> Dict[str, Any]:
     mode = "bridge" if BRIDGE_BASE else "stub"
-    base_tools = _base_tool_definitions()
+    base_tools = _combined_tool_definitions()
     tools = [
         {
             "id": tool["id"],
@@ -230,52 +234,17 @@ def _normalize_manifest_for_ui(manifest: dict) -> dict:
 
 
 def build_tools_for_rpc() -> List[Dict[str, Any]]:
-    draft_schema = _draft_input_schema()
+    plan_tools = _plan_tool_definitions(_draft_input_schema())
+    read_tools = mcp_tools_read.get_tool_definitions()
     tools: List[Dict[str, Any]] = [
         {
-            "name": "plan.validate",
-            "description": "Validate training plan draft against schema.plan.json",
-            "inputSchema": {
-                "$schema": MANIFEST_SCHEMA_URI,
-                "type": "object",
-                "required": ["draft"],
-                "properties": {
-                    "draft": draft_schema,
-                    "connection_id": {"type": "string"},
-                },
-            },
-        },
-        {
-            "name": "plan.publish",
-            "description": "Publish a plan; requires confirm:true; idempotent by external_id",
-            "inputSchema": {
-                "$schema": MANIFEST_SCHEMA_URI,
-                "type": "object",
-                "required": ["external_id", "draft", "confirm"],
-                "properties": {
-                    "external_id": {"type": "string"},
-                    "draft": draft_schema,
-                    "confirm": {"type": "boolean"},
-                    "connection_id": {"type": "string"},
-                },
-            },
-        },
-        {
-            "name": "plan.delete",
-            "description": "Delete a plan by external_id; requires confirm:true",
-            "inputSchema": {
-                "$schema": MANIFEST_SCHEMA_URI,
-                "type": "object",
-                "required": ["external_id", "confirm"],
-                "properties": {
-                    "external_id": {"type": "string"},
-                    "confirm": {"type": "boolean"},
-                    "connection_id": {"type": "string"},
-                },
-            },
-        },
+            "name": tool["name"],
+            "description": tool["description"],
+            "inputSchema": tool["inputSchema"],
+        }
+        for tool in plan_tools
     ]
-    tools.extend(mcp_tools_read.get_tool_definitions())
+    tools.extend(read_tools)
     return tools
 
 
@@ -327,11 +296,27 @@ async def mcp_options() -> Response:
         status_code=200,
         headers=_mcp_headers(
             {
-                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
                 "Access-Control-Allow-Headers": "*",
             }
         ),
     )
+
+
+def _manifest_response() -> JSONResponse:
+    manifest = build_manifest()
+    manifest = _normalize_manifest_for_ui(manifest)
+    return JSONResponse(
+        manifest,
+        headers=_mcp_headers(
+            {"Access-Control-Allow-Methods": "GET, POST, OPTIONS"}
+        ),
+    )
+
+
+@app.get("/mcp")
+async def mcp_manifest() -> JSONResponse:
+    return _manifest_response()
 
 
 @app.post("/mcp")
@@ -772,9 +757,7 @@ async def mcp_connect(
 
 @app.get("/mcp/manifest")
 async def http_manifest() -> JSONResponse:
-    manifest = build_manifest()
-    manifest = _normalize_manifest_for_ui(manifest)
-    return JSONResponse(manifest, headers={"Access-Control-Allow-Origin": "*"})
+    return _manifest_response()
 
 
 @app.get("/mcp/resource/{name}")
