@@ -21,7 +21,7 @@ from .linking import get_status as linking_get_status
 from .linking import set_linked as linking_set_linked
 from .linking import set_pending as linking_set_pending
 from .mcp import resources_user as mcp_resources_user
-from .mcp import tools_read as mcp_tools_read
+from .mcp import tools_plan_write_ext, tools_read as mcp_tools_read
 from .mcp import tools_session as mcp_tools_session
 from .routes.read_user import router as read_user_router
 
@@ -82,7 +82,7 @@ def _draft_input_schema() -> Dict[str, Any]:
 
 
 def _plan_tool_definitions(draft_schema: Dict[str, Any]) -> List[Dict[str, Any]]:
-    return [
+    base_tools = [
         {
             "id": "plan.validate",
             "name": "plan.validate",
@@ -129,6 +129,9 @@ def _plan_tool_definitions(draft_schema: Dict[str, Any]) -> List[Dict[str, Any]]
             },
         },
     ]
+
+    extra_tools = list(tools_plan_write_ext.get_tool_definitions(draft_schema))
+    return [*base_tools, *extra_tools]
 
 
 def _combined_tool_definitions() -> List[Dict[str, Any]]:
@@ -387,6 +390,22 @@ async def mcp_rpc(request: Request) -> JSONResponse:
                 result = await mcp_tools_read.call_tool(name, arguments)
                 return rpc_ok(rpc_id, result)
 
+            if tools_plan_write_ext.has_tool(name):
+                payload_in = dict(arguments)
+                if connection_id and not payload_in.get("connection_id"):
+                    payload_in["connection_id"] = connection_id
+                user_id = _resolve_user_id(connection_id)
+                if not user_id:
+                    hint = _link_hint(request, connection_id)
+                    return rpc_ok(rpc_id, _tool_json_content(hint))
+                try:
+                    result = await tools_plan_write_ext.call_tool(
+                        name, payload_in, user_id=user_id
+                    )
+                except tools_plan_write_ext.ToolError as exc:
+                    return rpc_err(rpc_id, exc.code, exc.message, exc.data)
+                return rpc_ok(rpc_id, _tool_json_content(result))
+
             if name == "plan.validate":
                 payload_in = dict(arguments)
                 if connection_id and not payload_in.get("connection_id"):
@@ -409,7 +428,7 @@ async def mcp_rpc(request: Request) -> JSONResponse:
                 return rpc_ok(rpc_id, _tool_json_content(result))
 
             return rpc_err(rpc_id, -32601, f"Method tools/call: unknown tool '{name}'")
-        except mcp_tools_read.ToolError as exc:
+        except (mcp_tools_read.ToolError, tools_plan_write_ext.ToolError) as exc:
             return rpc_err(rpc_id, exc.code, exc.message, exc.data)
         except Exception as exc:  # pragma: no cover - defensive guard
             return rpc_err(rpc_id, -32000, "Tool execution error", str(exc))

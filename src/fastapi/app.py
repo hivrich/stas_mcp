@@ -21,7 +21,9 @@ class Request:
         try:
             return json.loads(self._body.decode("utf-8"))
         except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail={"ok": False, "error": "invalid_json"}) from exc
+            raise HTTPException(
+                status_code=400, detail={"ok": False, "error": "invalid_json"}
+            ) from exc
 
 
 class FastAPI:
@@ -35,7 +37,9 @@ class FastAPI:
     def post(self, path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         return self._register("POST", path)
 
-    def _register(self, method: str, path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def _register(
+        self, method: str, path: str
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
             self._routes[(method.upper(), path)] = func
             return func

@@ -24,9 +24,16 @@ class GwUnavailable(GwError):
 class GwBadResponse(GwError):
     """Raised when the gateway returns unexpected data."""
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        payload: Any | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.payload = payload
 
 
 _REQUEST_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
@@ -104,14 +111,78 @@ async def get_plan_week(
     return _ensure_list_of_dicts(data, "plan events")
 
 
+async def plan_update(
+    *,
+    user_id: int,
+    external_id: str,
+    patch: Dict[str, Any],
+    dry_run: bool = False,
+    if_match: str | None = None,
+) -> Dict[str, Any]:
+    params: Dict[str, Any] = {"external_id": external_id}
+    if dry_run:
+        params["dry_run"] = "true"
+    headers: Dict[str, str] = {}
+    if if_match is not None:
+        headers["If-Match"] = if_match
+    return await _request_json(
+        "PATCH",
+        f"/icu/plan/{external_id}",
+        user_id=user_id,
+        params=params,
+        json_payload={"patch": patch},
+        extra_headers=headers or None,
+    )
+
+
+async def plan_status(*, user_id: int, external_id: str) -> Dict[str, Any]:
+    params = {"external_id": external_id}
+    return await _request_json(
+        "GET",
+        f"/icu/plan/{external_id}",
+        user_id=user_id,
+        params=params,
+    )
+
+
+async def plan_list(
+    *,
+    user_id: int,
+    athlete_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> Dict[str, Any]:
+    params: Dict[str, Any] = {"limit": str(limit)}
+    if athlete_id:
+        params["athlete_id"] = athlete_id
+    if date_from:
+        params["date_from"] = date_from
+    if date_to:
+        params["date_to"] = date_to
+    if cursor:
+        params["cursor"] = cursor
+    return await _request_json(
+        "GET",
+        "/icu/plan",
+        user_id=user_id,
+        params=params,
+    )
+
+
 async def _request_json(
     method: str,
     path: str,
     *,
     user_id: int,
     params: Optional[Dict[str, Any]] = None,
+    json_payload: Optional[Dict[str, Any]] = None,
+    extra_headers: Optional[Dict[str, str]] = None,
 ) -> Any:
     headers = {"Authorization": make_bearer_for_user(user_id)}
+    if extra_headers:
+        headers.update(extra_headers)
     url = path
     last_error: Optional[BaseException] = None
 
@@ -121,11 +192,16 @@ async def _request_json(
                 base_url=settings.BRIDGE_BASE,
                 timeout=_REQUEST_TIMEOUT,
             ) as client:
+                request_kwargs: Dict[str, Any] = {
+                    "headers": headers,
+                    "params": {"user_id": user_id, **(params or {})},
+                }
+                if json_payload is not None:
+                    request_kwargs["json"] = json_payload
                 response = await client.request(
                     method,
                     url,
-                    headers=headers,
-                    params={"user_id": user_id, **(params or {})},
+                    **request_kwargs,
                 )
         except httpx.RequestError as exc:  # pragma: no cover - covered via branch
             last_error = exc
@@ -137,9 +213,18 @@ async def _request_json(
         if response.status_code >= 500:
             raise GwUnavailable("gateway returned a server error")
         if response.status_code >= 400:
+            error_payload: Any | None = None
+            try:
+                error_payload = response.json()
+            except ValueError:
+                try:
+                    error_payload = response.text
+                except Exception:  # pragma: no cover - defensive
+                    error_payload = None
             raise GwBadResponse(
                 f"gateway responded with {response.status_code}",
                 status_code=response.status_code,
+                payload=error_payload,
             )
 
         try:
@@ -195,4 +280,7 @@ __all__ = [
     "get_trainings",
     "get_user_summary",
     "make_bearer_for_user",
+    "plan_list",
+    "plan_status",
+    "plan_update",
 ]

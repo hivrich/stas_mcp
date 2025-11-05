@@ -31,6 +31,9 @@ async def test_tools_list_includes_read_tools() -> None:
     assert "user.summary.fetch" in names
     assert "user.last_training.fetch" in names
     assert "session.set_user_id" in names
+    assert "plan.update" in names
+    assert "plan.status" in names
+    assert "plan.list" in names
 
 
 @pytest.mark.anyio
@@ -47,3 +50,6 @@ async def test_http_manifest_includes_read_tools() -> None:
     assert "user.summary.fetch" in names
     assert "user.last_training.fetch" in names
     assert "session.set_user_id" in names
+    assert "plan.update" in names
+    assert "plan.status" in names
+    assert "plan.list" in names
