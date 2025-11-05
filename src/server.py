@@ -75,6 +75,33 @@ def _tool_json_content(obj: Any) -> Dict[str, Any]:
         return obj
     return {"content": [{"type": "json", "json": obj}]}
 
+def _ensure_external_id_consistency(name: str, arguments: Dict[str, Any]) -> Dict[str, Any] | None:
+    """
+    Возвращает JSON-RPC result (content -> ok:false) при нарушении правил, иначе None.
+    Правила:
+      • external_id обязателен для plan.publish/update/delete/status
+      • для plan.publish: arguments.external_id == arguments.draft.external_id
+      • формат детерминированный: plan:{athlete_id}:{first_day}~{last_day}  (рекомендуется; не строго валидируем)
+    """
+    def _bad(message: str) -> Dict[str, Any]:
+        return {"content": [{"type": "json", "json": {"ok": False, "error": {"code": 422, "message": message}}},
+                            {"type": "text", "text": f"error 422: {message}"}]}
+
+    if name not in ("plan.publish", "plan.update", "plan.delete", "plan.status"):
+        return None
+
+    ext = (arguments or {}).get("external_id")
+    if not ext or not isinstance(ext, str) or not ext.strip():
+        return _bad("external_id is required and must be a non-empty string")
+
+    if name == "plan.publish":
+        draft = (arguments or {}).get("draft") or {}
+        draft_ext = draft.get("external_id")
+        if not draft_ext or draft_ext != ext:
+            return _bad("plan.publish requires external_id to equal draft.external_id (byte-for-byte)")
+    return None
+
+
 
 # ---------- schemas for plan.* in tools/list ----------
 def _draft_input_schema() -> Dict[str, Any]:
@@ -304,30 +331,48 @@ async def mcp_rpc(request: Request) -> JSONResponse:
                 return rpc_ok(rpc_id, _tool_json_content(result))
 
             if name == "plan.publish":
+                # NEW: preflight external_id consistency check
+                bad = _ensure_external_id_consistency(name, arguments)
+                if bad is not None:
+                    return rpc_ok(rpc_id, bad)
+            
                 payload_in = dict(arguments)
                 if connection_id and not payload_in.get("connection_id"):
                     payload_in["connection_id"] = connection_id
                 result = await plan_publish(request, payload_in)
                 return rpc_ok(rpc_id, _tool_json_content(result))
-
+            
             if name == "plan.update":
+                bad = _ensure_external_id_consistency(name, arguments)
+                if bad is not None:
+                    return rpc_ok(rpc_id, bad)
+            
                 payload_in = dict(arguments)
                 if connection_id and not payload_in.get("connection_id"):
                     payload_in["connection_id"] = connection_id
                 result = await plan_update(request, payload_in)
                 return rpc_ok(rpc_id, _tool_json_content(result))
-
-            if name == "plan.status":
-                payload_in = dict(arguments)
-                result = await plan_status(payload_in)
-                return rpc_ok(rpc_id, _tool_json_content(result))
-
+            
             if name == "plan.delete":
+                bad = _ensure_external_id_consistency(name, arguments)
+                if bad is not None:
+                    return rpc_ok(rpc_id, bad)
+            
                 payload_in = dict(arguments)
                 if connection_id and not payload_in.get("connection_id"):
                     payload_in["connection_id"] = connection_id
                 result = await plan_delete(request, payload_in)
                 return rpc_ok(rpc_id, _tool_json_content(result))
+            
+            if name == "plan.status":
+                bad = _ensure_external_id_consistency(name, arguments)
+                if bad is not None:
+                    return rpc_ok(rpc_id, bad)
+            
+                payload_in = dict(arguments)
+                result = await plan_status(payload_in)
+                return rpc_ok(rpc_id, _tool_json_content(result))
+
 
             return rpc_err(rpc_id, -32601, f"Method tools/call: unknown tool '{name}'")
 
