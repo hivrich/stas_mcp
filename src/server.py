@@ -332,11 +332,14 @@ async def mcp_rpc(request: Request) -> JSONResponse:
             return rpc_err(rpc_id, -32601, f"Method tools/call: unknown tool '{name}'")
 
         except (mcp_tools_read.ToolError, PlanToolError) as exc:  # type: ignore[attr-defined]
+            # ВОЗВРАЩАЕМ result с ok:false, а не JSON-RPC error
             code = getattr(exc, "code", 424) or 424
             message = getattr(exc, "message", str(exc))
-            return rpc_err(rpc_id, code, message)
+            return rpc_ok(rpc_id, _tool_json_content({"ok": False, "error": {"code": code, "message": message}}))
+
         except Exception as exc:  # pragma: no cover
             logging.exception("tools/call unhandled exception: %s", exc)
-            return rpc_err(rpc_id, -32000, "Tool execution error", str(exc))
+            return rpc_ok(rpc_id, _tool_json_content({"ok": False, "error": {"code": 424, "message": str(exc)}}))
+
 
     return rpc_err(rpc_id, -32601, f"Unknown method '{method}'")
