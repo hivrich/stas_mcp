@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+import json
 from typing import Any, Dict, List, Mapping, Optional
 
 from src.clients import gw
@@ -35,7 +36,7 @@ class ToolError(RuntimeError):
 _TOOL_DEFINITIONS = (
     ToolDefinition(
         name="user.summary.fetch",
-        description="Fetch read-only summary for a user by user_id.",
+        description="Fetch read-only summary for a user by user_id (returns plain text summary).",
         input_schema={
             "$schema": "http://json-schema.org/draft-07/schema#",
             "type": "object",
@@ -130,15 +131,47 @@ def _today() -> date:
     return date.today()
 
 
-async def _call_user_summary(arguments: Mapping[str, Any]) -> Dict[str, Any]:
+async def _call_user_summary(arguments: Mapping[str, Any]) -> str:
     user_id = _coerce_user_id(arguments)
     try:
-        return await gw.get_user_summary(user_id)
+        raw_summary = await gw.get_user_summary(user_id)
     except gw.GwUnavailable as exc:
         raise ToolError("GwUnavailable", "gateway unavailable") from exc
     except gw.GwBadResponse as exc:
         data = {"status": exc.status_code} if exc.status_code is not None else None
         raise ToolError("GwBadResponse", "gateway returned bad response", data) from exc
+
+    return _stringify_summary(raw_summary)
+
+
+def _stringify_summary(raw_summary: Any) -> str:
+    payload = raw_summary
+    if isinstance(raw_summary, Mapping) and raw_summary.get("ok") is True:
+        payload = raw_summary.get("user_summary", payload)
+
+    if isinstance(payload, Mapping):
+        for key in ("text", "summary", "description"):
+            if key in payload:
+                value = payload[key]
+                if isinstance(value, bytes):
+                    return value.decode("utf-8", errors="replace")
+                return str(value)
+        try:
+            return json.dumps(
+                payload, ensure_ascii=False, separators=(",", ":"), default=str
+            )
+        except TypeError:
+            return str(payload)
+
+    if isinstance(payload, bytes):
+        return payload.decode("utf-8", errors="replace")
+    if isinstance(payload, str):
+        return payload
+
+    try:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+    except TypeError:
+        return str(payload)
 
 
 async def _call_user_last_training(arguments: Mapping[str, Any]) -> Dict[str, Any]:
