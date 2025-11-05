@@ -260,22 +260,35 @@ def _normalize_manifest_for_ui(manifest: dict) -> dict:
 
 
 def build_tools_for_rpc() -> List[Dict[str, Any]]:
-    # Для tools/list показываем плановые + читающие + сессионные (если нужны)
+    """
+    Формируем список инструментов для tools/list.
+    Порядок добавления:
+      1) плановые (validate/publish/delete/...),
+      2) читающие (user.summary.fetch / user.last_training.fetch / plan.list из tools_read),
+      3) сессионные.
+    При совпадении имён побеждает ПОСЛЕДНЕЕ определение (наши read-tools перекрывают старые).
+    """
+    # 1) исходные наборы
     plan_tools = _plan_tool_definitions(_draft_input_schema())
     read_tools = mcp_tools_read.get_tool_definitions()
     session_tools = mcp_tools_session.get_tool_definitions()
 
-    tools: List[Dict[str, Any]] = [
-        {
-            "name": tool["name"],
-            "description": tool["description"],
-            "inputSchema": tool["inputSchema"],
-        }
-        for tool in plan_tools
-    ]
-    tools.extend(read_tools)
-    tools.extend(session_tools)
-    return tools
+    # 2) дедупликация по имени (last-wins)
+    merged: dict[str, dict] = {}
+
+    def _merge(tools: Sequence[Dict[str, Any]]) -> None:
+        for t in tools:
+            name = (t.get("name") or t.get("id") or "").strip()
+            if not name:
+                continue
+            merged[name] = t  # last-wins
+
+    _merge(plan_tools)
+    _merge(read_tools)      # перекрывает старый plan.list «планового» набора
+    _merge(session_tools)
+
+    # 3) вернуть финальный список
+    return list(merged.values())
 
 
 def _mcp_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
