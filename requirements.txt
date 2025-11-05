@@ -5,3 +5,4 @@ jsonschema
 orjson
 python-multipart
 httpx
+aiohttp==3.10.5
