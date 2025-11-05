@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterator, List
 
 import pytest
 from asgi_lifespan import LifespanManager
@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 
 from src.clients import gw
 from src.mcp import tools_read
+from src.session import store as session_store
 from src.server import app
 
 
@@ -19,13 +20,23 @@ async def _post_rpc(client: AsyncClient, payload: Dict[str, Any]) -> Dict[str, A
     return response.json()
 
 
+@pytest.fixture(autouse=True)
+def _reset_session_store() -> Iterator[None]:
+    session_store.clear_user_id()
+    yield
+    session_store.clear_user_id()
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("gw_response", "expected"),
     [
         ({"ok": True, "user_summary": {"text": "Alpha text"}}, "Alpha text"),
         ({"ok": True, "user_summary": {"summary": "Beta summary"}}, "Beta summary"),
-        ({"ok": True, "user_summary": {"description": "Gamma description"}}, "Gamma description"),
+        (
+            {"ok": True, "user_summary": {"description": "Gamma description"}},
+            "Gamma description",
+        ),
     ],
 )
 async def test_user_summary_fetch_plain_text(
@@ -224,7 +235,7 @@ async def test_missing_user_id_returns_invalid_params() -> None:
             )
 
     assert data["error"]["code"] == "InvalidParams"
-    assert "user_id" in data["error"]["message"]
+    assert "session.set_user_id" in data["error"]["message"]
 
 
 @pytest.mark.anyio
