@@ -1,13 +1,12 @@
-# src/mcp/tools_plan.py
-# Заглушки для планов: всегда ok:true и пустые/минимальные структуры.
-
 from typing import Any, Dict, Tuple
 
 def _ok(data: Dict[str, Any], label: str) -> Tuple[Dict[str, Any], str]:
     return {"ok": True, **data}, f"{label}: ok"
 
 async def plan_list(arguments: Dict[str, Any]):
-    window = {"oldest": arguments.get("oldest"), "newest": arguments.get("newest"), "category": arguments.get("category")}
+    window = {"oldest": arguments.get("oldest"),
+              "newest": arguments.get("newest"),
+              "category": arguments.get("category")}
     return _ok({"items": [], "window": window}, "plan.list")
 
 async def plan_status(arguments: Dict[str, Any]):
