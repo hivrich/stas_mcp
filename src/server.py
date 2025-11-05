@@ -63,6 +63,26 @@ BRIDGE_BASE = settings.BRIDGE_BASE.rstrip("/")
 MODE = "bridge" if BRIDGE_BASE else "stub"
 
 app = FastAPI()
+HTTP_CLIENT: httpx.AsyncClient | None = None
+
+@app.on_event("startup")
+async def _startup():
+    global HTTP_CLIENT
+    HTTP_CLIENT = httpx.AsyncClient(
+        timeout=httpx.Timeout(30.0),
+        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        transport=httpx.AsyncHTTPTransport(retries=2),
+        headers={"User-Agent": "ChatGPT-User/1.0"},
+    )
+
+@app.on_event("shutdown")
+async def _shutdown():
+    global HTTP_CLIENT
+    if HTTP_CLIENT:
+        await HTTP_CLIENT.aclose()
+        HTTP_CLIENT = None
+# === /pooled httpx client ===
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://chatgpt.com", "https://staging.chatgpt.com", "https://chat.openai.com"],
@@ -138,11 +158,11 @@ def _plan_tool_definitions(draft_schema: Dict[str, Any]) -> List[Dict[str, Any]]
 
 
 def _combined_tool_definitions() -> List[Dict[str, Any]]:
+    # То же для UI-манифеста
     draft_schema = _draft_input_schema()
     plan_tools = _plan_tool_definitions(draft_schema)
     read_tools = mcp_tools_read.get_tool_definitions()
-    session_tools = mcp_tools_session.get_tool_definitions()
-    return [*plan_tools, *read_tools, *session_tools]
+    return [*plan_tools, *read_tools]
 
 
 def build_manifest() -> Dict[str, Any]:
@@ -244,9 +264,9 @@ def _normalize_manifest_for_ui(manifest: dict) -> dict:
 
 
 def build_tools_for_rpc() -> List[Dict[str, Any]]:
+    # Только плановые + читающие инструменты. session.* не даём чату.
     plan_tools = _plan_tool_definitions(_draft_input_schema())
     read_tools = mcp_tools_read.get_tool_definitions()
-    session_tools = mcp_tools_session.get_tool_definitions()
     tools: List[Dict[str, Any]] = [
         {
             "name": tool["name"],
@@ -256,7 +276,6 @@ def build_tools_for_rpc() -> List[Dict[str, Any]]:
         for tool in plan_tools
     ]
     tools.extend(read_tools)
-    tools.extend(session_tools)
     return tools
 
 
@@ -359,7 +378,7 @@ async def mcp_rpc(request: Request) -> JSONResponse:
     if params and not isinstance(params, dict):
         return rpc_err(rpc_id, -32602, "Invalid params: expected object")
 
-    if method == "initialize":
+        if method == "initialize":
         proto = params.get("protocolVersion") or MCP_PROTOCOL_VERSION
         result = {
             "protocolVersion": proto,
@@ -518,19 +537,34 @@ async def gw(
     json_payload: Optional[Dict[str, Any]] = None,
     ua: str = "ChatGPT-User/1.0",
 ) -> Any:
+    if not BRIDGE_BASE:
+        raise httpx.RequestError("BRIDGE_BASE not configured")
     url = f"{BRIDGE_BASE}{path}"
-    headers = {
-        "Authorization": f"Bearer {_bearer(uid)}",
-        "User-Agent": ua,
-    }
-    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
-        response = await client.request(
-            method.upper(), url, params=params, json=json_payload, headers=headers
+    token = (
+        "t_" + base64.urlsafe_b64encode(json.dumps({"uid": int(uid)}).encode())
+        .decode()
+        .rstrip("=")
+    )
+    headers = {"Authorization": f"Bearer {token}", "User-Agent": ua}
+
+    assert HTTP_CLIENT is not None, "HTTP client not initialized"
+    t0 = time.perf_counter()
+    try:
+        resp = await HTTP_CLIENT.request(
+            method.upper(),
+            url,
+            params=params,
+            json=json_payload,
+            headers=headers,
         )
-        response.raise_for_status()
-        if response.headers.get("content-type", "").startswith("application/json"):
-            return response.json()
-        return response.text
+        resp.raise_for_status()
+        if resp.headers.get("content-type", "").startswith("application/json"):
+            return resp.json()
+        return resp.text
+    except Exception as exc:
+        dt_ms = int((time.perf_counter() - t0) * 1000)
+        logger.error("gw %s %s failed in %dms: %s", method, path, dt_ms, exc)
+        raise
 
 
 def _draft_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
