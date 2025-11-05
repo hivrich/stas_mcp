@@ -396,80 +396,91 @@ async def mcp_rpc(request: Request) -> JSONResponse:
 
     # --- tools/call ---
     if method == "tools/call":
-        name = str(params.get("name") or "").strip()
+    name = str(params.get("name") or "").strip()
 
-        # --- tolerant arguments parsing (object OR JSON string) ---
-        arguments_raw = params.get("arguments", {})
-        if isinstance(arguments_raw, str):
+    # --- tolerant arguments parsing ---
+    def _normalize_arguments(p: dict) -> dict:
+        raw = p.get("arguments", p.get("args", {}))
+        # bytes/bytearray -> str
+        if isinstance(raw, (bytes, bytearray)):
             try:
-                arguments = json.loads(arguments_raw)
+                raw = raw.decode("utf-8", "strict")
+            except Exception:
+                pass
+        # str -> json
+        if isinstance(raw, str):
+            raw = raw.strip()
+            try:
+                return json.loads(raw) if raw else {}
             except Exception as exc:
-                return rpc_err(
-                    rpc_id,
-                    -32602,
-                    "Invalid params: arguments must be object or JSON string",
-                    f"json.loads failed: {exc}",
-                )
-        elif isinstance(arguments_raw, dict):
-            arguments = arguments_raw
-        else:
-            return rpc_err(
-                rpc_id,
-                -32602,
-                f"Invalid params: arguments type {type(arguments_raw)} (expected object or JSON string)",
-            )
+                raise ValueError(f"arguments: invalid JSON string: {exc}")
+        # dict -> ok
+        if isinstance(raw, dict):
+            return raw
+        raise ValueError(f"arguments: unsupported type {type(raw)}; expected object or JSON string")
 
-        connection_id = (
-            request.headers.get("x-connection-id")
-            or request.headers.get("x-conn")
-            or request.query_params.get("cid")
-            or arguments.get("connection_id")
-        )
+    try:
+        arguments = _normalize_arguments(params)
+    except ValueError as exc:
+        return rpc_err(rpc_id, -32602, "Invalid params", str(exc))
 
-        try:
-            if mcp_tools_session.has_tool(name):
-                result = await mcp_tools_session.call_tool(name, arguments)
-                return rpc_ok(rpc_id, _tool_json_content(result))
+    # extract connection_id (header or args)
+    connection_id = (
+        request.headers.get("x-connection-id")
+        or request.headers.get("x-conn")
+        or request.query_params.get("cid")
+        or arguments.get("connection_id")
+    )
 
-            if mcp_tools_read.has_tool(name):
-                result = await mcp_tools_read.call_tool(name, arguments)
-                return rpc_ok(rpc_id, result)
+    try:
+        # session tools
+        if mcp_tools_session.has_tool(name):
+            result = await mcp_tools_session.call_tool(name, arguments)
+            return rpc_ok(rpc_id, _tool_json_content(result))
 
-            if name == "plan.validate":
-                result = await plan_validate(arguments)
-                return rpc_ok(rpc_id, _tool_json_content(result))
+        # read tools
+        if mcp_tools_read.has_tool(name):
+            result = await mcp_tools_read.call_tool(name, arguments)
+            return rpc_ok(rpc_id, result)  # уже завернут {content:[...]}
+        
+        # plan.* tools
+        if name == "plan.validate":
+            result = await plan_validate(arguments)
+            return rpc_ok(rpc_id, _tool_json_content(result))
 
-            if name == "plan.publish":
-                payload_in = dict(arguments)
-                if connection_id and not payload_in.get("connection_id"):
-                    payload_in["connection_id"] = connection_id
-                result = await plan_publish(request, payload_in)
-                return rpc_ok(rpc_id, _tool_json_content(result))
+        if name == "plan.publish":
+            payload_in = dict(arguments)
+            if connection_id and not payload_in.get("connection_id"):
+                payload_in["connection_id"] = connection_id
+            result = await plan_publish(request, payload_in)
+            return rpc_ok(rpc_id, _tool_json_content(result))
 
-            if name == "plan.update":
-                payload_in = dict(arguments)
-                if connection_id and not payload_in.get("connection_id"):
-                    payload_in["connection_id"] = connection_id
-                result = await plan_update(request, payload_in)
-                return rpc_ok(rpc_id, _tool_json_content(result))
+        if name == "plan.update":
+            payload_in = dict(arguments)
+            if connection_id and not payload_in.get("connection_id"):
+                payload_in["connection_id"] = connection_id
+            result = await plan_update(request, payload_in)
+            return rpc_ok(rpc_id, _tool_json_content(result))
 
-            if name == "plan.status":
-                payload_in = dict(arguments)
-                result = await plan_status(payload_in)
-                return rpc_ok(rpc_id, _tool_json_content(result))
+        if name == "plan.status":
+            payload_in = dict(arguments)
+            result = await plan_status(payload_in)
+            return rpc_ok(rpc_id, _tool_json_content(result))
 
-            if name == "plan.delete":
-                payload_in = dict(arguments)
-                if connection_id and not payload_in.get("connection_id"):
-                    payload_in["connection_id"] = connection_id
-                result = await plan_delete(request, payload_in)
-                return rpc_ok(rpc_id, _tool_json_content(result))
+        if name == "plan.delete":
+            payload_in = dict(arguments)
+            if connection_id and not payload_in.get("connection_id"):
+                payload_in["connection_id"] = connection_id
+            result = await plan_delete(request, payload_in)
+            return rpc_ok(rpc_id, _tool_json_content(result))
 
-            return rpc_err(rpc_id, -32601, f"Method tools/call: unknown tool '{name}'")
-        except (mcp_tools_read.ToolError, tools_plan_write_ext.ToolError) as exc:  # type: ignore[attr-defined]
-            return rpc_err(rpc_id, exc.code, exc.message, getattr(exc, "data", None))
-        except Exception as exc:  # pragma: no cover - defensive guard
-            return rpc_err(rpc_id, -32000, "Tool execution error", str(exc))
+        return rpc_err(rpc_id, -32601, f"Method tools/call: unknown tool '{name}'")
+
+    except (mcp_tools_read.ToolError, tools_plan_write_ext.ToolError) as exc:  # type: ignore[attr-defined]
+        # прокидываем наш код/сообщение как JSON-RPC error (HTTP 200, чтобы api_tool не считал это сетевой ошибкой)
+        return rpc_err(rpc_id, getattr(exc, "code", 424) or 424, getattr(exc, "message", str(exc)))
+    except Exception as exc:  # pragma: no cover - defensive
+        return rpc_err(rpc_id, -32000, "Tool execution error", str(exc))
 
     # --- resources/* ---
     if method == "resources/list":
