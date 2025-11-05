@@ -217,17 +217,23 @@ def has_tool(name: str) -> bool:
 
 
 async def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-    import json as _json  # локальный импорт, чтобы не конфликтовать с глобальным
+    import json as _json  # локально, чтобы не конфликтовало
+    def _err(code: int, message: str, data: Any | None = None) -> Dict[str, Any]:
+        payload = {"ok": False, "error": {"code": code, "message": message}}
+        if data is not None:
+            payload["error"]["data"] = data
+        return _ok_json(payload)
+
     try:
-        # ← НОВОЕ: приводим строковые args к объекту
+        # ← Толерантность к строковым args (на всякий случай, если сервер уже не распарсил)
         if isinstance(arguments, str):
             try:
                 arguments = _json.loads(arguments)
             except Exception as _e:
-                raise ToolError(424, f"invalid arguments (expected JSON object, got str): {type(arguments)}: {_e}")
+                return _err(424, f"invalid arguments (expected JSON object, got str): {_e}")
 
         if not isinstance(arguments, dict):
-            raise ToolError(424, f"invalid arguments type: {type(arguments)} (expected object)")
+            return _err(424, f"invalid arguments type: {type(arguments)} (expected object)")
 
         if name == "user.summary.fetch":
             user_id = int(arguments.get("user_id"))
@@ -240,7 +246,6 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             newest = arguments.get("newest")
             items, rng = await _read_trainings(user_id, oldest, newest)
 
-            # Парсим даты у каждого элемента; фильтруем будущее; берём максимум по дате
             newest_d = _to_date(rng.get("newest"))
             with_dates: List[Tuple[dt.date, dict]] = []
             for it in items:
@@ -267,12 +272,14 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
 
             return _ok_json({"ok": True, "items": events, "count": len(events), "range": rng})
 
-    except httpx.HTTPStatusError as exc:
-        raise ToolError(424, f"upstream {exc.response.status_code}: {exc}")
-    except ToolError:
-        raise
-    except Exception as exc:
-        raise ToolError(424, f"tool '{name}' failed: {exc}")
+        # неизвестный инструмент
+        return _err(404, f"unknown tool '{name}'")
 
-    raise ToolError(404, f"unknown tool '{name}'")
+    except httpx.HTTPStatusError as exc:
+        # мягкий ответ вместо исключения
+        st = int(getattr(exc, "response", None).status_code or 424)
+        return _err(424, f"upstream {st}: {exc}")
+    except Exception as exc:
+        # общая защита — тоже мягкий ответ
+        return _err(424, f"tool '{name}' failed: {exc}")
 
