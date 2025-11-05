@@ -397,9 +397,27 @@ async def mcp_rpc(request: Request) -> JSONResponse:
     # --- tools/call ---
     if method == "tools/call":
         name = str(params.get("name") or "").strip()
-        arguments = params.get("arguments") or {}
-        if not isinstance(arguments, dict):
-            return rpc_err(rpc_id, -32602, "Invalid params: arguments must be object")
+
+        # --- tolerant arguments parsing (object OR JSON string) ---
+        arguments_raw = params.get("arguments", {})
+        if isinstance(arguments_raw, str):
+            try:
+                arguments = json.loads(arguments_raw)
+            except Exception as exc:
+                return rpc_err(
+                    rpc_id,
+                    -32602,
+                    "Invalid params: arguments must be object or JSON string",
+                    f"json.loads failed: {exc}",
+                )
+        elif isinstance(arguments_raw, dict):
+            arguments = arguments_raw
+        else:
+            return rpc_err(
+                rpc_id,
+                -32602,
+                f"Invalid params: arguments type {type(arguments_raw)} (expected object or JSON string)",
+            )
 
         connection_id = (
             request.headers.get("x-connection-id")
@@ -411,31 +429,14 @@ async def mcp_rpc(request: Request) -> JSONResponse:
         try:
             if mcp_tools_session.has_tool(name):
                 result = await mcp_tools_session.call_tool(name, arguments)
-                return rpc_ok(rpc_id, result)
+                return rpc_ok(rpc_id, _tool_json_content(result))
 
             if mcp_tools_read.has_tool(name):
                 result = await mcp_tools_read.call_tool(name, arguments)
                 return rpc_ok(rpc_id, result)
 
-            if tools_plan_write_ext.has_tool(name):
-                payload_in = dict(arguments)
-                if connection_id and not payload_in.get("connection_id"):
-                    payload_in["connection_id"] = connection_id
-                user_id = _resolve_user_id(connection_id)
-                if not user_id:
-                    hint = _link_hint(request, connection_id)
-                    return rpc_ok(rpc_id, _tool_json_content(hint))
-                try:
-                    result = await tools_plan_write_ext.call_tool(name, payload_in, user_id=user_id)
-                except tools_plan_write_ext.ToolError as exc:
-                    return rpc_err(rpc_id, exc.code, exc.message, exc.data)
-                return rpc_ok(rpc_id, _tool_json_content(result))
-
             if name == "plan.validate":
-                payload_in = dict(arguments)
-                if connection_id and not payload_in.get("connection_id"):
-                    payload_in["connection_id"] = connection_id
-                result = await plan_validate(payload=payload_in)
+                result = await plan_validate(arguments)
                 return rpc_ok(rpc_id, _tool_json_content(result))
 
             if name == "plan.publish":
@@ -443,6 +444,18 @@ async def mcp_rpc(request: Request) -> JSONResponse:
                 if connection_id and not payload_in.get("connection_id"):
                     payload_in["connection_id"] = connection_id
                 result = await plan_publish(request, payload_in)
+                return rpc_ok(rpc_id, _tool_json_content(result))
+
+            if name == "plan.update":
+                payload_in = dict(arguments)
+                if connection_id and not payload_in.get("connection_id"):
+                    payload_in["connection_id"] = connection_id
+                result = await plan_update(request, payload_in)
+                return rpc_ok(rpc_id, _tool_json_content(result))
+
+            if name == "plan.status":
+                payload_in = dict(arguments)
+                result = await plan_status(payload_in)
                 return rpc_ok(rpc_id, _tool_json_content(result))
 
             if name == "plan.delete":
