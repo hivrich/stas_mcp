@@ -882,11 +882,16 @@ async def plan_publish(
         return {"ok": False, "error": "invalid_payload"}
 
     draft = _draft_from_payload(payload)
-    external_id = (
+    raw_external_id = (
         str(payload.get("external_id") or draft.get("external_id") or "").strip()
         or "plan:auto"
     )
-    events = _build_events(draft, external_id)
+    normalized_external_id = (
+        raw_external_id
+        if raw_external_id.startswith("plan:")
+        else f"plan:{raw_external_id}"
+    )
+    events = _build_events(draft, normalized_external_id)
 
     conn_id = _resolve_connection_id(request, payload)
     user_id = _resolve_user_id(conn_id)
@@ -901,28 +906,39 @@ async def plan_publish(
         }
 
     ua = _request_ua(request)
-    dry_params = {"external_id_prefix": "plan:", "dry_run": "true"}
-    dry_body = {"events": events}
-    try:
-        dry_response = await gw(
-            "POST",
-            "/icu/events",
-            uid=user_id,
-            params=dry_params,
-            json_payload=dry_body,
-            ua=ua,
-        )
-    except httpx.HTTPError as exc:
-        return {"ok": False, "error": str(exc), "stage": "dry_run"}
+    params = {"external_id_prefix": "plan:"}
 
+    summary: Dict[str, Any] = {}
+    dry_response: Dict[str, Any] | None = None
     if not payload.get("confirm"):
+        try:
+            dry_response = await gw(
+                "POST",
+                "/icu/events",
+                uid=user_id,
+                params={**params, "dry_run": "true"},
+                json_payload={"events": events, "external_id": normalized_external_id},
+                ua=ua,
+            )
+        except httpx.HTTPError as exc:
+            return {"ok": False, "error": str(exc), "stage": "dry_run"}
+
         return {
             "ok": False,
             "need_confirm": True,
             "hint": "Add confirm:true",
-            "external_id": external_id,
+            "external_id": raw_external_id,
+            "external_id_normalized": normalized_external_id,
+            "status": "preview",
             "days_written": _unique_days(events),
-            "dry_run": dry_response,
+            "events": len(events),
+            "dry_run": {
+                "count": (
+                    int(dry_response.get("count", len(events)))
+                    if isinstance(dry_response, dict)
+                    else len(events)
+                )
+            },
         }
 
     try:
@@ -930,29 +946,49 @@ async def plan_publish(
             "POST",
             "/icu/events",
             uid=user_id,
-            params={"external_id_prefix": "plan:"},
-            json_payload=dry_body,
+            params={**params, "dry_run": "false"},
+            json_payload={"events": events, "external_id": normalized_external_id},
             ua=ua,
         )
     except httpx.HTTPError as exc:
         return {"ok": False, "error": str(exc), "stage": "publish"}
 
+    if isinstance(real_response, dict):
+        summary = {
+            "count": int(
+                real_response.get("count") or real_response.get("events") or len(events)
+            ),
+            "updated": real_response.get("updated"),
+        }
+        if "etag" in real_response:
+            summary["etag"] = real_response.get("etag")
+    else:
+        summary = {"count": len(events)}
+
     result = {
         "ok": True,
-        "external_id": external_id,
-        "days_written": _unique_days(events),
-        "events": len(events),
+        "external_id": raw_external_id,
+        "external_id_normalized": normalized_external_id,
+        "status": "published",
         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "response": real_response,
-        "dry_run": dry_response,
+        "events": len(events),
+        "days_written": _unique_days(events),
+        "count": summary.get("count", len(events)),
     }
+    if "etag" in summary and summary["etag"]:
+        result["etag"] = summary["etag"]
+    if summary.get("updated") is not None:
+        updated = bool(summary["updated"])
+        result["updated"] = updated
+        if not updated:
+            result["no_op"] = True
     _append_audit(
         {
             "ts": int(time.time()),
             "connection_id": conn_id,
             "user_id": user_id,
             "op": "publish",
-            "external_id": external_id,
+            "external_id": normalized_external_id,
             "status": "ok",
         }
     )
