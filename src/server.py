@@ -18,9 +18,9 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 # External tool modules (present in repo)
-from mcp import tools_read as mcp_tools_read  # user.summary.fetch / user.last_training.fetch / plan.list
-from mcp import tools_session as mcp_tools_session  # session.* helpers
-from tools_plan_write_ext import (
+from .mcp import tools_read as mcp_tools_read  # user.summary.fetch / user.last_training.fetch / plan.list
+from .mcp import tools_session as mcp_tools_session  # session.* helpers
+from .tools_plan_write_ext import (
     plan_validate as _plan_validate,
     plan_publish as _plan_publish,
     plan_delete as _plan_delete,
