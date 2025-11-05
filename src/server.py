@@ -65,9 +65,11 @@ MODE = "bridge" if BRIDGE_BASE else "stub"
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["https://chatgpt.com", "https://staging.chatgpt.com", "https://chat.openai.com"],
+    allow_credentials=False,
+    allow_methods=["POST", "OPTIONS", "GET"],
+    allow_headers=["content-type", "authorization", "accept"],
+    max_age=86400,
 )
 app.include_router(read_user_router)
 
@@ -358,21 +360,16 @@ async def mcp_rpc(request: Request) -> JSONResponse:
         return rpc_err(rpc_id, -32602, "Invalid params: expected object")
 
     if method == "initialize":
-        # Берём версию из клиента, если прислал, иначе дефолт
-        proto = params.get("protocolVersion") or MCP_PROTOCOL_VERSION
-        result = {
-            "protocolVersion": proto,
-            "capabilities": {
-                # ЭТО главное: ChatGPT ожидает и list, и call
-                "tools": {"list": True, "call": True},
-                # Ресурсы мы поддерживаем ниже (resources/list, resources/read)
-                "resources": {"list": True, "read": True},
-                # Можно оставить «динамика» для совместимости — не обязательно
-                # "experimental": {"listChanged": True},
-            },
-            "serverInfo": {"name": "stas-mcp-bridge", "version": "1.0.0"},
-        }
-        return rpc_ok(rpc_id, result)
+    proto = params.get("protocolVersion") or MCP_PROTOCOL_VERSION
+    result = {
+        "protocolVersion": proto,
+        "capabilities": {
+            "tools": {"list": True, "call": True, "listChanged": True},
+            "resources": {"list": True, "read": True},
+        },
+        "serverInfo": {"name": "stas-mcp-bridge", "version": "1.0.0"},
+    }
+    return rpc_ok(rpc_id, result)
 
 
     if method == "tools/list":
