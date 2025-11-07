@@ -1,9 +1,7 @@
 name: Wake Render (STAS MCP)
 
 on:
-  schedule:
-    - cron: "*/10 * * * *"   # каждые 10 минут
-  workflow_dispatch:         # ручной запуск из вкладки Actions
+  workflow_dispatch:  # только ручной запуск из вкладки Actions
 
 concurrency:
   group: wake-render
@@ -33,7 +31,7 @@ jobs:
           set -euo pipefail
           BODY='{"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
           code=$(curl --http1.1 -sS -m 50 -o /dev/null -w "%{http_code}" \
-                 -H 'content-type: application/json' \
-                 -d "$BODY" https://stas-mcp.onrender.com/mcp || true)
+            -H 'content-type: application/json' \
+            -d "$BODY" https://stas-mcp.onrender.com/mcp || true)
           echo "initialize -> $code"
           test "$code" = "200" || exit 1
